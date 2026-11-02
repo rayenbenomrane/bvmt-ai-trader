@@ -37,3 +37,19 @@ class DailyPrice(Base):
     )
 
     instrument = relationship("Instrument", back_populates="prices")
+
+class CandlestickPattern(Base):
+    __tablename__ = "candlestick_patterns"
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    symbol = Column(String(20), ForeignKey("instruments.symbol", ondelete="CASCADE"), nullable=False)
+    date = Column(Date, nullable=False)
+    pattern_name = Column(String(50), nullable=False)
+    direction = Column(String(20), nullable=False) # BULLISH, BEARISH, NEUTRAL
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    __table_args__ = (
+        # FIXED LINE BELOW: Changed pattern_name= to name= and added 'pattern_name' as a column
+        UniqueConstraint('symbol', 'date', 'pattern_name', name='uq_symbol_date_pattern'),
+        Index('idx_candlestick_patterns_symbol_date', 'symbol', 'date'),
+    )
