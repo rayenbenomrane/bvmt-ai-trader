@@ -42,7 +42,7 @@ def run_benchmark_for_symbol(
     4. Selects optimal model and decision threshold based strictly on Validation set.
     5. Evaluates all models out-of-sample on the Test set.
     6. Simulates trading on the Test set with next-session open execution and integer shares.
-    7. Saves reports and model artifacts.
+    7. Saves reports, trade logs, and model artifacts.
     """
     db = SessionLocal()
     try:
@@ -60,7 +60,7 @@ def run_benchmark_for_symbol(
         df_clean = prepare_labeled_dataset(df_raw)
 
         print(f"\n==========================================")
-        print(f" BENCHMARK & SIMULATION: {symbol}")
+        print(f" BENCHMARK & SIMULATION AUDIT: {symbol}")
         print(f"==========================================")
         print(f" Total Sessions Analyzed : {len(df_clean)}")
 
@@ -87,7 +87,8 @@ def run_benchmark_for_symbol(
         # Simulation setup on the Test Partition
         test_parts = selection_result["test_partitions"]
         X_test = test_parts["X_test"]
-        dates_test = test_parts["dates_test"].reset_index(drop=True)
+        signal_dates = test_parts["dates_test"].reset_index(drop=True)
+        execution_dates = test_parts["next_date_test"].reset_index(drop=True)
         exec_prices = test_parts["next_open_test"].reset_index(drop=True)
         close_prices = test_parts["next_close_test"].reset_index(drop=True)
 
@@ -97,6 +98,7 @@ def run_benchmark_for_symbol(
             slippage_pct=slippage_pct,
             execution_price="open",
             allow_fractional_shares=False,
+            auto_close_at_end=True,
         )
         simulator = TradingSimulator(config=sim_config)
 
@@ -112,28 +114,55 @@ def run_benchmark_for_symbol(
             signals = (probs >= th).astype(int)
             sim_res = simulator.simulate(
                 signals=signals,
-                dates=dates_test,
+                dates=execution_dates,
                 exec_prices=exec_prices,
                 close_prices=close_prices,
+                signal_dates=signal_dates,
             )
-            # Remove full equity curve from summary dict for compact JSON report
-            eq_curve = sim_res.pop("equity_curve", [])
             model_sim_results[name] = sim_res
 
         winner_sim = model_sim_results[best_model_name]
 
         print(f"\n--- Trading Simulation Results ({symbol}) ---")
-        print(f" Model Used        : {best_model_name} (Threshold = {best_threshold:.2f})")
-        print(f" Initial Capital   : {initial_capital:.3f} TND")
-        print(f" Final Portfolio   : {winner_sim['final_portfolio_value']:.3f} TND (Return: {winner_sim['total_return_pct']:+.2f}%)")
-        print(f" Buy & Hold Return : {winner_sim['buy_and_hold_return_pct']:+.2f}%")
-        print(f" Max Drawdown      : {winner_sim['max_drawdown_pct']:.2f}%")
-        print(f" Total Trades      : {winner_sim['total_trades']} (Closed: {winner_sim['closed_trades']}, Win Rate: {winner_sim['win_rate_pct']:.1f}%)")
-        print(f" Transaction Costs : {winner_sim['total_fees_paid']:.3f} TND (Fee: {fee_rate*100:.2f}%, Slippage: {slippage_pct*100:.2f}%)")
+        print(f" Model Used            : {best_model_name} (Threshold = {best_threshold:.2f})")
+        print(f" Initial Capital       : {initial_capital:.3f} TND")
+        print(f" Final Portfolio Value : {winner_sim['final_portfolio_value']:.3f} TND (Return: {winner_sim['total_return_pct']:+.2f}%)")
+        print(f" Buy & Hold Return     : {winner_sim['buy_and_hold_return_pct']:+.2f}% (B&H Max DD: {winner_sim['buy_and_hold_max_drawdown_pct']:.2f}%)")
+        print(f" Strategy Max Drawdown : {winner_sim['max_drawdown_pct']:.2f}%")
+        print(f" Total Orders (Buys+Sells): {winner_sim['total_orders']}")
+        print(f" Closed Round Trips    : {winner_sim['closed_trades']}")
+        print(f" Gross Win Rate        : {winner_sim['gross_win_rate_pct']:.1f}%")
+        print(f" Net Win Rate          : {winner_sim['net_win_rate_pct']:.1f}%")
+        print(f" Total Gross P&L       : {winner_sim['total_gross_pnl']:+.3f} TND")
+        print(f" Total Net P&L         : {winner_sim['total_net_pnl']:+.3f} TND")
+        print(f" Total Fees Paid       : {winner_sim['total_fees_paid']:.3f} TND (Fee: {fee_rate*100:.2f}%, Slippage: {slippage_pct*100:.2f}%)")
+        print(f" Avg Holding Duration  : {winner_sim['average_holding_sessions']:.1f} sessions")
 
-        # Save benchmark report
+        # Export Trade-Level Log to CSV
         report_dir = "data/processed/reports"
         os.makedirs(report_dir, exist_ok=True)
+
+        trade_records = winner_sim.get("closed_trades_records", [])
+        if trade_records:
+            df_trades = pd.DataFrame(trade_records)
+            trade_csv_path = f"{report_dir}/{symbol}_trade_log.csv"
+            df_trades.to_csv(trade_csv_path, index=False)
+            print(f" Trade Log Exported    : {trade_csv_path} ({len(df_trades)} closed trades)")
+
+        # Prepare Clean JSON Report (omit raw curves to keep size reasonable)
+        report_sim = dict(winner_sim)
+        report_sim.pop("equity_curve", None)
+        report_sim.pop("bh_equity_curve", None)
+
+        all_sim_summary = {}
+        for m_name, m_res in model_sim_results.items():
+            summary_copy = dict(m_res)
+            summary_copy.pop("equity_curve", None)
+            summary_copy.pop("bh_equity_curve", None)
+            summary_copy.pop("orders", None)
+            summary_copy.pop("closed_trades_records", None)
+            all_sim_summary[m_name] = summary_copy
+
         report = {
             "symbol": symbol,
             "config": {
@@ -146,13 +175,13 @@ def run_benchmark_for_symbol(
             "selected_model": best_model_name,
             "selected_threshold": best_threshold,
             "model_benchmarks": test_evals,
-            "simulation": winner_sim,
-            "all_model_simulations": model_sim_results,
+            "simulation": report_sim,
+            "all_model_simulations": all_sim_summary,
         }
 
         report_file = f"{report_dir}/{symbol}_benchmark_simulation.json"
         with open(report_file, "w") as f:
-            json.dump(report, f, indent=4)
+            json.dump(report, f, indent=4, default=str)
 
         return report
 

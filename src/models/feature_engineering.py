@@ -132,6 +132,7 @@ def prepare_labeled_dataset(
 
     df_feat["next_close"] = df_feat["close"].shift(-1)
     df_feat["next_open"] = df_feat["open"].shift(-1)
+    df_feat["next_date"] = df_feat["date"].shift(-1)
     df_feat["next_return"] = (df_feat["next_close"] - df_feat["close"]) / df_feat["close"]
 
     # Target: binary direction (1 = UP, 0 = FLAT/DOWN)
@@ -146,6 +147,6 @@ def prepare_labeled_dataset(
     df_feat["target_3class"] = np.select(conditions, choices, default=1)
 
     # Drop warm-up rows (moving averages, ATR, RSI require up to 50 sessions) and final row (missing next_return)
-    clean_cols = FEATURE_COLUMNS + ["target_binary", "target_3class", "next_return", "next_open", "next_close"]
+    clean_cols = FEATURE_COLUMNS + ["target_binary", "target_3class", "next_return", "next_open", "next_close", "next_date"]
     df_clean = df_feat.dropna(subset=clean_cols).copy().reset_index(drop=True)
     return df_clean

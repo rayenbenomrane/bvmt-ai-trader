@@ -304,6 +304,7 @@ def train_and_select_model(
             "X_test": X_test,
             "y_test": y_test,
             "dates_test": dates.iloc[val_end:],
+            "next_date_test": df_clean["next_date"].iloc[val_end:],
             "next_open_test": df_clean["next_open"].iloc[val_end:],
             "next_close_test": df_clean["next_close"].iloc[val_end:],
             "close_test": df_clean["close"].iloc[val_end:],

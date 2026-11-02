@@ -1,3 +1,17 @@
-from src.simulator.trading_simulator import TradingSimulator, SimulationConfig, TradeRecord
+from src.simulator.trading_simulator import (
+    TradingSimulator,
+    SimulationConfig,
+    OrderExecutionRecord,
+    ClosedTradeRecord,
+)
 
-__all__ = ["TradingSimulator", "SimulationConfig", "TradeRecord"]
+# Backwards compatibility alias
+TradeRecord = OrderExecutionRecord
+
+__all__ = [
+    "TradingSimulator",
+    "SimulationConfig",
+    "OrderExecutionRecord",
+    "ClosedTradeRecord",
+    "TradeRecord",
+]
