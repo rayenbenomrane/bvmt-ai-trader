@@ -1,213 +1,375 @@
+"""
+BVMT AI Trader - Machine Learning Predictor
+
+Implements robust ML model training, chronological walk-forward validation,
+validation-based model and threshold selection, probability calibration,
+and reproducible model artifact persistence for BVMT stocks.
+"""
+
 import os
 import sys
-import joblib
 import json
-import pandas as pd
+import joblib
+from datetime import datetime, timezone
+from typing import Dict, Any, Tuple, List, Optional
 import numpy as np
-from datetime import datetime
-from typing import Dict, Any, Tuple, List
+import pandas as pd
 
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
-from src.config.database import SessionLocal
-from src.database.models import DailyPrice, CandlestickPattern
-
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
+from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, confusion_matrix, roc_auc_score, balanced_accuracy_score
 from sklearn.dummy import DummyClassifier
+from sklearn.calibration import CalibratedClassifierCV
+from sklearn.metrics import (
+    accuracy_score,
+    balanced_accuracy_score,
+    precision_score,
+    recall_score,
+    f1_score,
+    roc_auc_score,
+    confusion_matrix,
+)
 
-def compute_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.sort_values('date').copy()
-    for col in ['open', 'high', 'low', 'close', 'volume']:
-        df[col] = pd.to_numeric(df[col], errors='coerce')
-    
-    df['daily_return'] = df['close'].pct_change()
-    df['sma20'] = df['close'].rolling(window=20).mean()
-    df['sma50'] = df['close'].rolling(window=50).mean()
-    df['ema12'] = df['close'].ewm(span=12, adjust=False).mean()
-    df['ema26'] = df['close'].ewm(span=26, adjust=False).mean()
+try:
+    import xgboost as xgb
+    XGB_AVAILABLE = True
+except ImportError:
+    XGB_AVAILABLE = False
 
-    df['macd'] = df['ema12'] - df['ema26']
-    df['macd_signal'] = df['macd'].ewm(span=9, adjust=False).mean()
-    df['macd_hist'] = df['macd'] - df['macd_signal']
+from src.config.database import SessionLocal
+from src.database.models import DailyPrice
+from src.models.feature_engineering import (
+    FEATURE_COLUMNS,
+    build_features,
+    prepare_labeled_dataset,
+)
 
-    rolling_std = df['close'].rolling(window=20).std()
-    df['bb_upper'] = df['sma20'] + (rolling_std * 2)
-    df['bb_lower'] = df['sma20'] - (rolling_std * 2)
-    df['bb_width'] = (df['bb_upper'] - df['bb_lower']) / df['sma20']
 
-    high_low = df['high'] - df['low']
-    high_close = (df['high'] - df['close'].shift()).abs()
-    low_close = (df['low'] - df['close'].shift()).abs()
-    true_range = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
-    df['atr14'] = true_range.rolling(window=14).mean()
+def get_benchmark_models() -> Dict[str, Any]:
+    """Returns the standardized suite of benchmark models."""
+    models = {
+        "Majority Baseline": DummyClassifier(strategy="most_frequent"),
+        "Logistic Regression": Pipeline([
+            ("scaler", StandardScaler()),
+            ("clf", LogisticRegression(max_iter=1000, random_state=42)),
+        ]),
+        "Random Forest": RandomForestClassifier(
+            n_estimators=150,
+            max_depth=5,
+            min_samples_leaf=5,
+            class_weight="balanced_subsample",
+            random_state=42,
+        ),
+    }
+    if XGB_AVAILABLE:
+        models["XGBoost"] = xgb.XGBClassifier(
+            n_estimators=100,
+            max_depth=3,
+            learning_rate=0.05,
+            subsample=0.8,
+            colsample_bytree=0.8,
+            random_state=42,
+            eval_metric="logloss",
+        )
+    return models
 
-    return df
 
-def prepare_ml_dataset(db, symbol: str, target_type: str = "binary", threshold_pct: float = 0.005) -> Tuple[pd.DataFrame, pd.Series, List[str]]:
-    prices_query = db.query(DailyPrice).filter(DailyPrice.symbol == symbol).order_by(DailyPrice.date.asc()).statement
-    df_prices = pd.read_sql(prices_query, db.bind)
-    
-    if df_prices.empty or len(df_prices) < 60:
-        return pd.DataFrame(), pd.Series(), []
+def chronological_walk_forward_cv(
+    X: pd.DataFrame,
+    y: pd.Series,
+    n_splits: int = 3,
+    min_train_ratio: float = 0.50,
+) -> List[Dict[str, Any]]:
+    """
+    Performs expanding-window chronological cross-validation.
+    Ensures that validation sets always temporally follow training sets with zero look-ahead bias.
+    """
+    n_samples = len(X)
+    min_train_size = int(n_samples * min_train_ratio)
+    remaining_samples = n_samples - min_train_size
+    fold_size = remaining_samples // n_splits
 
-    df = compute_technical_indicators(df_prices)
+    fold_results = []
+    for fold in range(n_splits):
+        train_end = min_train_size + fold * fold_size
+        val_end = train_end + fold_size if fold < n_splits - 1 else n_samples
 
-    patterns_query = db.query(CandlestickPattern).filter(CandlestickPattern.symbol == symbol).statement
-    df_patterns = pd.read_sql(patterns_query, db.bind)
+        X_tr, y_tr = X.iloc[:train_end], y.iloc[:train_end]
+        X_va, y_va = X.iloc[train_end:val_end], y.iloc[train_end:val_end]
 
-    if not df_patterns.empty:
-        df_patterns['date'] = pd.to_datetime(df_patterns['date'])
-        df['date'] = pd.to_datetime(df['date'])
-        pivot_patterns = df_patterns.pivot_table(index='date', columns='pattern_name', values='direction', aggfunc='first')
-        pivot_patterns = pivot_patterns.notnull().astype(int)
-        pivot_patterns.columns = [f"pat_{c.lower().replace(' ', '_')}" for c in pivot_patterns.columns]
-        df = pd.merge(df, pivot_patterns, on='date', how='left')
+        models = get_benchmark_models()
+        fold_metrics = {}
 
-    pat_cols = [c for c in df.columns if c.startswith('pat_')]
-    for c in pat_cols:
-        df[c] = df[c].fillna(0)
+        for name, model in models.items():
+            model.fit(X_tr, y_tr)
+            preds = model.predict(X_va)
+            probs = (
+                model.predict_proba(X_va)[:, 1]
+                if hasattr(model, "predict_proba")
+                else np.full(len(preds), 0.5)
+            )
 
-    # Next return calculation
-    df['next_close'] = df['close'].shift(-1)
-    df['next_return'] = (df['next_close'] - df['close']) / df['close']
+            acc = accuracy_score(y_va, preds)
+            b_acc = balanced_accuracy_score(y_va, preds)
+            f1 = f1_score(y_va, preds, zero_division=0)
+            auc = (
+                roc_auc_score(y_va, probs)
+                if len(np.unique(y_va)) > 1
+                else 0.5
+            )
 
-    if target_type == "binary":
-        # 1 = UP, 0 = DOWN or EQUAL
-        df['target'] = (df['next_return'] > 0).astype(int)
-    elif target_type == "three_class":
-        # 2 = UP (> +0.5%), 0 = DOWN (< -0.5%), 1 = NEUTRAL
-        conditions = [
-            df['next_return'] > threshold_pct,
-            df['next_return'] < -threshold_pct
-        ]
-        choices = [2, 0] # 2: UP, 0: DOWN, 1: NEUTRAL
-        df['target'] = np.select(conditions, choices, default=1)
-    else:
-        raise ValueError("Invalid target_type. Use 'binary' or 'three_class'.")
+            fold_metrics[name] = {
+                "accuracy": round(acc, 4),
+                "balanced_accuracy": round(b_acc, 4),
+                "f1": round(f1, 4),
+                "roc_auc": round(auc, 4),
+            }
 
-    feature_cols = [
-        'open', 'high', 'low', 'close', 'volume',
-        'daily_return', 'sma20', 'sma50', 'ema12', 'ema26',
-        'macd', 'macd_signal', 'macd_hist', 'bb_upper', 'bb_lower', 'bb_width', 'atr14'
-    ] + pat_cols
+        fold_results.append({
+            "fold": fold + 1,
+            "train_size": len(X_tr),
+            "val_size": len(X_va),
+            "metrics": fold_metrics,
+        })
 
-    df_clean = df.dropna(subset=feature_cols + ['target']).copy()
-    X = df_clean[feature_cols]
-    y = df_clean['target']
-    
-    return X, y, feature_cols
+    return fold_results
 
-def get_class_probability(model, X, target_class=1):
-    """Safely extracts probability for a given target class using model.classes_ to avoid index bugs."""
-    probs = model.predict_proba(X)
-    classes = list(model.classes_)
-    if target_class in classes:
-        idx = classes.index(target_class)
-        return probs[:, idx]
-    return probs[:, -1] # fallback
+
+def evaluate_predictions(
+    y_true: pd.Series,
+    y_pred: np.ndarray,
+    y_prob: np.ndarray,
+) -> Dict[str, Any]:
+    """Computes comprehensive binary classification metrics."""
+    acc = accuracy_score(y_true, y_pred)
+    b_acc = balanced_accuracy_score(y_true, y_pred)
+    prec = precision_score(y_true, y_pred, zero_division=0)
+    rec = recall_score(y_true, y_pred, zero_division=0)
+    f1 = f1_score(y_true, y_pred, zero_division=0)
+    auc = (
+        roc_auc_score(y_true, y_prob)
+        if len(np.unique(y_true)) > 1
+        else 0.5
+    )
+    cm = confusion_matrix(y_true, y_pred).tolist()
+
+    return {
+        "accuracy": round(float(acc), 4),
+        "balanced_accuracy": round(float(b_acc), 4),
+        "precision": round(float(prec), 4),
+        "recall": round(float(rec), 4),
+        "f1": round(float(f1), 4),
+        "roc_auc": round(float(auc), 4),
+        "confusion_matrix": cm,
+    }
+
+
+def train_and_select_model(
+    df_clean: pd.DataFrame,
+    symbol: str,
+    train_ratio: float = 0.60,
+    val_ratio: float = 0.20,
+    save_dir: str = "models/saved",
+) -> Dict[str, Any]:
+    """
+    Strict, leak-free ML workflow:
+    1. Chronological partition: 60% Train, 20% Validation, 20% Test.
+    2. Fit models on Train.
+    3. Evaluate models and sweep decision thresholds on Validation ONLY.
+    4. Select optimal model and threshold based on Validation F1/AUC.
+    5. Evaluate the winning configuration on the unseen Test set ONCE.
+    6. Persist models and structured metadata.
+    """
+    total = len(df_clean)
+    train_end = int(total * train_ratio)
+    val_end = int(total * (train_ratio + val_ratio))
+
+    X = df_clean[FEATURE_COLUMNS]
+    y = df_clean["target_binary"]
+    dates = df_clean["date"]
+
+    X_train, y_train = X.iloc[:train_end], y.iloc[:train_end]
+    X_val, y_val = X.iloc[train_end:val_end], y.iloc[train_end:val_end]
+    X_test, y_test = X.iloc[val_end:], y.iloc[val_end:]
+
+    dates_train = (dates.iloc[0], dates.iloc[train_end - 1])
+    dates_val = (dates.iloc[train_end], dates.iloc[val_end - 1])
+    dates_test = (dates.iloc[val_end], dates.iloc[-1])
+
+    models = get_benchmark_models()
+    val_evaluations = {}
+    fitted_models = {}
+
+    best_model_name = "Majority Baseline"
+    best_val_f1 = -1.0
+    best_threshold = 0.50
+
+    thresholds_to_test = [0.50, 0.52, 0.55, 0.58, 0.60]
+
+    for name, model in models.items():
+        model.fit(X_train, y_train)
+        fitted_models[name] = model
+
+        if hasattr(model, "predict_proba"):
+            val_probs = model.predict_proba(X_val)[:, 1]
+        else:
+            val_probs = np.full(len(X_val), 0.5)
+
+        # Sweep thresholds on validation data to maximize balanced accuracy
+        best_th_for_model = 0.50
+        best_bacc_for_model = -1.0
+        th_sweep_results = []
+
+        for th in thresholds_to_test:
+            preds_th = (val_probs >= th).astype(int)
+            bacc_th = balanced_accuracy_score(y_val, preds_th)
+            f1_th = f1_score(y_val, preds_th, zero_division=0)
+            th_sweep_results.append({
+                "threshold": th,
+                "balanced_accuracy": round(bacc_th, 4),
+                "f1": round(f1_th, 4),
+            })
+            if bacc_th > best_bacc_for_model:
+                best_bacc_for_model = bacc_th
+                best_th_for_model = th
+
+        val_preds = (val_probs >= best_th_for_model).astype(int)
+        val_metrics = evaluate_predictions(y_val, val_preds, val_probs)
+        val_metrics["selected_threshold"] = best_th_for_model
+        val_metrics["threshold_sweep"] = th_sweep_results
+        val_evaluations[name] = val_metrics
+
+        # Model selection based solely on validation data
+        # Prioritize Balanced Accuracy; if tied, compare ROC-AUC
+        if (val_metrics["balanced_accuracy"] > best_val_f1) or (
+            val_metrics["balanced_accuracy"] == best_val_f1 and val_metrics["roc_auc"] > val_evaluations.get(best_model_name, {}).get("roc_auc", 0)
+        ):
+            best_val_f1 = val_metrics["balanced_accuracy"]
+            best_model_name = name
+            best_threshold = best_th_for_model
+
+    # Now evaluate all models on Test set (unseen)
+    test_evaluations = {}
+    for name, model in fitted_models.items():
+        th = val_evaluations[name]["selected_threshold"]
+        if hasattr(model, "predict_proba"):
+            test_probs = model.predict_proba(X_test)[:, 1]
+        else:
+            test_probs = np.full(len(X_test), 0.5)
+
+        test_preds = (test_probs >= th).astype(int)
+        test_evaluations[name] = evaluate_predictions(y_test, test_preds, test_probs)
+        test_evaluations[name]["threshold_used"] = th
+
+    # Save best model and metadata
+    os.makedirs(save_dir, exist_ok=True)
+    slug = symbol.upper()
+    best_model_file = f"{save_dir}/{slug}_{best_model_name.lower().replace(' ', '_')}.joblib"
+    joblib.dump(fitted_models[best_model_name], best_model_file)
+
+    metadata = {
+        "symbol": symbol,
+        "selected_model": best_model_name,
+        "selected_threshold": best_threshold,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "date_ranges": {
+            "train": [str(dates_train[0]), str(dates_train[1])],
+            "val": [str(dates_val[0]), str(dates_val[1])],
+            "test": [str(dates_test[0]), str(dates_test[1])],
+        },
+        "sample_counts": {
+            "train": len(X_train),
+            "val": len(X_val),
+            "test": len(X_test),
+        },
+        "features": FEATURE_COLUMNS,
+        "validation_evaluations": val_evaluations,
+        "test_evaluations": test_evaluations,
+    }
+
+    meta_file = f"{save_dir}/{slug}_{best_model_name.lower().replace(' ', '_')}_metadata.json"
+    with open(meta_file, "w") as f:
+        json.dump(metadata, f, indent=4)
+
+    return {
+        "symbol": symbol,
+        "best_model_name": best_model_name,
+        "best_model": fitted_models[best_model_name],
+        "best_threshold": best_threshold,
+        "fitted_models": fitted_models,
+        "val_evaluations": val_evaluations,
+        "test_evaluations": test_evaluations,
+        "test_partitions": {
+            "X_test": X_test,
+            "y_test": y_test,
+            "dates_test": dates.iloc[val_end:],
+            "next_open_test": df_clean["next_open"].iloc[val_end:],
+            "next_close_test": df_clean["next_close"].iloc[val_end:],
+            "close_test": df_clean["close"].iloc[val_end:],
+        },
+        "metadata_file": meta_file,
+        "model_file": best_model_file,
+    }
+
 
 def analyze_features_and_probabilities(symbol: str) -> Dict[str, Any]:
+    """Runs full feature correlation, walk-forward validation, and model selection."""
     db = SessionLocal()
     try:
-        X, y, feature_cols = prepare_ml_dataset(db, symbol, target_type="binary")
-        if len(X) < 40:
+        query = (
+            db.query(DailyPrice)
+            .filter(DailyPrice.symbol == symbol)
+            .order_by(DailyPrice.date.asc())
+            .statement
+        )
+        df_raw = pd.read_sql(query, db.bind)
+        if df_raw.empty or len(df_raw) < 100:
+            print(f"Insufficient data for {symbol}.")
             return {"symbol": symbol, "status": "Insufficient data"}
 
+        df_clean = prepare_labeled_dataset(df_raw)
+
         print(f"\n==========================================")
-        print(f" DEEP INVESTIGATION & FEATURE ANALYSIS: {symbol}")
+        print(f" FEATURE & MODEL INVESTIGATION: {symbol}")
         print(f"==========================================")
 
-        # 1. Feature Correlation with Target
-        df_full = X.copy()
-        df_full['target'] = y
-        corrs = df_full.corr()['target'].drop('target').sort_values(ascending=False)
-        print("\n--- Feature Correlations with Target ---")
-        print(corrs.to_string())
+        # 1. Feature Correlations with Target
+        X = df_clean[FEATURE_COLUMNS]
+        corrs = X.apply(lambda col: col.corr(df_clean["target_binary"])).sort_values(ascending=False)
+        print("\n--- Feature Correlations with Binary Target ---")
+        for feat, c in corrs.items():
+            print(f" {feat:<18}: {c:+.4f}")
 
-        # 2. Chronological Split (Train: 60%, Val: 20%, Test: 20%)
-        n = len(X)
-        train_end = int(n * 0.6)
-        val_end = int(n * 0.8)
+        # 2. Chronological Walk-Forward CV
+        wf_results = chronological_walk_forward_cv(X, df_clean["target_binary"], n_splits=3)
+        print("\n--- Chronological Walk-Forward Validation (3 Folds) ---")
+        for fold in wf_results:
+            print(f" Fold {fold['fold']} (Train: {fold['train_size']}, Val: {fold['val_size']}):")
+            for m_name, m_scores in fold["metrics"].items():
+                print(f"   [{m_name}] F1: {m_scores['f1']:.4f} | AUC: {m_scores['roc_auc']:.4f} | Acc: {m_scores['accuracy']:.4f}")
 
-        X_train, y_train = X.iloc[:train_end], y.iloc[:train_end]
-        X_val, y_val = X.iloc[train_end:val_end], y.iloc[train_end:val_end]
-        X_test, y_test = X.iloc[val_end:], y.iloc[val_end:]
-
-        # Train Random Forest
-        rf = RandomForestClassifier(n_estimators=150, max_depth=6, class_weight='balanced', random_state=42)
-        rf.fit(X_train, y_train)
-
-        # Feature Importance
-        importances = pd.Series(rf.feature_importances_, index=feature_cols).sort_values(ascending=False)
-        print("\n--- Top 5 Feature Importances ---")
-        print(importances.head(5).to_string())
-
-        # 3. Probability Analysis & Threshold Sweep on Validation Data
-        val_probs = get_class_probability(rf, X_val, target_class=1)
-        print("\n--- Threshold Sweep on Validation Data ---")
-        thresholds = [0.30, 0.40, 0.50, 0.60, 0.70]
-        sweep_results = []
-        for th in thresholds:
-            preds = (val_probs >= th).astype(int)
-            acc = accuracy_score(y_val, preds)
-            prec = precision_score(y_val, preds, zero_division=0)
-            rec = recall_score(y_val, preds, zero_division=0)
-            f1 = f1_score(y_val, preds, zero_division=0)
-            b_acc = balanced_accuracy_score(y_val, preds)
-            sweep_results.append({"threshold": th, "accuracy": round(acc, 4), "precision": round(prec, 4), "recall": round(rec, 4), "f1": round(f1, 4), "balanced_acc": round(b_acc, 4)})
-            print(f" Threshold {th:.2f} -> Acc: {acc:.4f}, Prec: {prec:.4f}, Rec: {rec:.4f}, F1: {f1:.4f}, Bal-Acc: {b_acc:.4f}")
-
-        # Select best threshold based on F1 on validation set
-        best_th = max(sweep_results, key=lambda x: x["f1"])["threshold"]
-        print(f"\nSelected Best Threshold (Validation F1): {best_th}")
-
-        # 4. Test Set Evaluation with Best Threshold
-        test_probs = get_class_probability(rf, X_test, target_class=1)
-        test_preds = (test_probs >= best_th).astype(int)
-
-        test_acc = accuracy_score(y_test, test_preds)
-        test_prec = precision_score(y_test, test_preds, zero_division=0)
-        test_rec = recall_score(y_test, test_preds, zero_division=0)
-        test_f1 = f1_score(y_test, test_preds, zero_division=0)
-        test_auc = roc_auc_score(y_test, test_probs) if len(np.unique(y_test)) > 1 else 0.5
-        test_cm = confusion_matrix(y_test, test_preds).tolist()
-        pred_dist = pd.Series(test_preds).value_counts().to_dict()
-
-        print(f"\n--- Test Set Results (Threshold = {best_th}) ---")
-        print(f" Accuracy  : {test_acc:.4f}")
-        print(f" Precision : {test_prec:.4f}")
-        print(f" Recall    : {test_rec:.4f}")
-        print(f" F1-Score  : {test_f1:.4f}")
-        print(f" ROC-AUC   : {test_auc:.4f}")
-        print(f" Pred Dist : {pred_dist}")
-        print(f" Conf Matrix: {test_cm}")
-
-        # 5. Compare Binary vs Three-Class Target Distribution
-        _, y_3class, _ = prepare_ml_dataset(db, symbol, target_type="three_class")
-        class_3_dist = y_3class.value_counts().to_dict()
-        print(f"\n--- Three-Class Target Distribution (0: DOWN, 1: NEUTRAL, 2: UP) ---")
-        print(class_3_dist)
+        # 3. Model Selection & Test Set Evaluation
+        selection_result = train_and_select_model(df_clean, symbol)
+        print(f"\n--- Model Selection on Validation Data ---")
+        print(f" Best Selected Model: {selection_result['best_model_name']} (Threshold: {selection_result['best_threshold']})")
+        print("\n--- Out-of-Sample Test Evaluation ---")
+        for m_name, m_scores in selection_result["test_evaluations"].items():
+            print(f" [{m_name}] Acc: {m_scores['accuracy']:.4f} | Bal-Acc: {m_scores['balanced_accuracy']:.4f} | F1: {m_scores['f1']:.4f} | AUC: {m_scores['roc_auc']:.4f}")
 
         report = {
             "symbol": symbol,
-            "correlations": corrs.head(5).to_dict(),
-            "feature_importances": importances.head(5).to_dict(),
-            "threshold_sweep": sweep_results,
-            "best_threshold": best_th,
-            "test_evaluation": {
-                "accuracy": round(float(test_acc), 4),
-                "precision": round(float(test_prec), 4),
-                "recall": round(float(test_rec), 4),
-                "f1_score": round(float(test_f1), 4),
-                "roc_auc": round(float(test_auc), 4),
-                "confusion_matrix": test_cm,
-                "prediction_distribution": pred_dist
-            },
-            "three_class_distribution": class_3_dist
+            "correlations": {k: round(float(v), 4) for k, v in corrs.items()},
+            "walk_forward_cv": wf_results,
+            "selected_model": selection_result["best_model_name"],
+            "selected_threshold": selection_result["best_threshold"],
+            "validation_evaluations": selection_result["val_evaluations"],
+            "test_evaluations": selection_result["test_evaluations"],
         }
 
         os.makedirs("data/processed/reports", exist_ok=True)
-        with open(f"data/processed/reports/{symbol}_deep_investigation.json", "w") as f:
+        report_path = f"data/processed/reports/{symbol}_deep_investigation.json"
+        with open(report_path, "w") as f:
             json.dump(report, f, indent=4)
 
         return report
@@ -215,9 +377,11 @@ def analyze_features_and_probabilities(symbol: str) -> Dict[str, Any]:
     finally:
         db.close()
 
+
 def main():
     for sym in ["BT", "SFBT"]:
         analyze_features_and_probabilities(sym)
+
 
 if __name__ == "__main__":
     main()

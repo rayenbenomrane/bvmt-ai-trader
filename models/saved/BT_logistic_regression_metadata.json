@@ -1,0 +1,307 @@
+{
+    "symbol": "BT",
+    "selected_model": "Logistic Regression",
+    "selected_threshold": 0.4,
+    "created_at": "2026-11-02T21:57:26.957446+00:00",
+    "date_ranges": {
+        "train": [
+            "2023-03-10",
+            "2025-05-15"
+        ],
+        "val": [
+            "2025-05-16",
+            "2026-02-05"
+        ],
+        "test": [
+            "2026-02-06",
+            "2026-10-30"
+        ]
+    },
+    "sample_counts": {
+        "train": 544,
+        "val": 181,
+        "test": 182
+    },
+    "features": [
+        "return_1d",
+        "return_2d",
+        "return_5d",
+        "volatility_5d",
+        "volatility_20d",
+        "dist_sma20",
+        "dist_sma50",
+        "volume_rel_20",
+        "rsi_14",
+        "rsi_14_diff",
+        "macd_norm",
+        "macd_hist_norm",
+        "macd_hist_diff",
+        "norm_range",
+        "norm_close_pos",
+        "atr14_norm"
+    ],
+    "validation_evaluations": {
+        "Majority Baseline": {
+            "accuracy": 0.5746,
+            "balanced_accuracy": 0.5,
+            "precision": 0.0,
+            "recall": 0.0,
+            "f1": 0.0,
+            "roc_auc": 0.5,
+            "confusion_matrix": [
+                [
+                    104,
+                    0
+                ],
+                [
+                    77,
+                    0
+                ]
+            ],
+            "selected_threshold": 0.4,
+            "threshold_sweep": [
+                {
+                    "threshold": 0.4,
+                    "balanced_accuracy": 0.5,
+                    "f1": 0.0
+                },
+                {
+                    "threshold": 0.45,
+                    "balanced_accuracy": 0.5,
+                    "f1": 0.0
+                },
+                {
+                    "threshold": 0.5,
+                    "balanced_accuracy": 0.5,
+                    "f1": 0.0
+                },
+                {
+                    "threshold": 0.55,
+                    "balanced_accuracy": 0.5,
+                    "f1": 0.0
+                },
+                {
+                    "threshold": 0.6,
+                    "balanced_accuracy": 0.5,
+                    "f1": 0.0
+                }
+            ]
+        },
+        "Logistic Regression": {
+            "accuracy": 0.6022,
+            "balanced_accuracy": 0.5662,
+            "precision": 0.5556,
+            "recall": 0.3247,
+            "f1": 0.4098,
+            "roc_auc": 0.5512,
+            "confusion_matrix": [
+                [
+                    84,
+                    20
+                ],
+                [
+                    52,
+                    25
+                ]
+            ],
+            "selected_threshold": 0.4,
+            "threshold_sweep": [
+                {
+                    "threshold": 0.4,
+                    "balanced_accuracy": 0.5662,
+                    "f1": 0.4098
+                },
+                {
+                    "threshold": 0.45,
+                    "balanced_accuracy": 0.5174,
+                    "f1": 0.2883
+                },
+                {
+                    "threshold": 0.5,
+                    "balanced_accuracy": 0.5219,
+                    "f1": 0.2524
+                },
+                {
+                    "threshold": 0.55,
+                    "balanced_accuracy": 0.52,
+                    "f1": 0.1915
+                },
+                {
+                    "threshold": 0.6,
+                    "balanced_accuracy": 0.5279,
+                    "f1": 0.1778
+                }
+            ]
+        },
+        "Random Forest": {
+            "accuracy": 0.5912,
+            "balanced_accuracy": 0.538,
+            "precision": 0.56,
+            "recall": 0.1818,
+            "f1": 0.2745,
+            "roc_auc": 0.5071,
+            "confusion_matrix": [
+                [
+                    93,
+                    11
+                ],
+                [
+                    63,
+                    14
+                ]
+            ],
+            "selected_threshold": 0.55,
+            "threshold_sweep": [
+                {
+                    "threshold": 0.4,
+                    "balanced_accuracy": 0.5073,
+                    "f1": 0.411
+                },
+                {
+                    "threshold": 0.45,
+                    "balanced_accuracy": 0.534,
+                    "f1": 0.371
+                },
+                {
+                    "threshold": 0.5,
+                    "balanced_accuracy": 0.5109,
+                    "f1": 0.2727
+                },
+                {
+                    "threshold": 0.55,
+                    "balanced_accuracy": 0.538,
+                    "f1": 0.2745
+                },
+                {
+                    "threshold": 0.6,
+                    "balanced_accuracy": 0.4892,
+                    "f1": 0.1099
+                }
+            ]
+        },
+        "XGBoost": {
+            "accuracy": 0.5801,
+            "balanced_accuracy": 0.525,
+            "precision": 0.5217,
+            "recall": 0.1558,
+            "f1": 0.24,
+            "roc_auc": 0.5009,
+            "confusion_matrix": [
+                [
+                    93,
+                    11
+                ],
+                [
+                    65,
+                    12
+                ]
+            ],
+            "selected_threshold": 0.45,
+            "threshold_sweep": [
+                {
+                    "threshold": 0.4,
+                    "balanced_accuracy": 0.514,
+                    "f1": 0.2617
+                },
+                {
+                    "threshold": 0.45,
+                    "balanced_accuracy": 0.525,
+                    "f1": 0.24
+                },
+                {
+                    "threshold": 0.5,
+                    "balanced_accuracy": 0.494,
+                    "f1": 0.1111
+                },
+                {
+                    "threshold": 0.55,
+                    "balanced_accuracy": 0.4875,
+                    "f1": 0.0899
+                },
+                {
+                    "threshold": 0.6,
+                    "balanced_accuracy": 0.481,
+                    "f1": 0.0682
+                }
+            ]
+        }
+    },
+    "test_evaluations": {
+        "Majority Baseline": {
+            "accuracy": 0.5714,
+            "balanced_accuracy": 0.5,
+            "precision": 0.0,
+            "recall": 0.0,
+            "f1": 0.0,
+            "roc_auc": 0.5,
+            "confusion_matrix": [
+                [
+                    104,
+                    0
+                ],
+                [
+                    78,
+                    0
+                ]
+            ],
+            "threshold_used": 0.4
+        },
+        "Logistic Regression": {
+            "accuracy": 0.544,
+            "balanced_accuracy": 0.5016,
+            "precision": 0.4324,
+            "recall": 0.2051,
+            "f1": 0.2783,
+            "roc_auc": 0.5457,
+            "confusion_matrix": [
+                [
+                    83,
+                    21
+                ],
+                [
+                    62,
+                    16
+                ]
+            ],
+            "threshold_used": 0.4
+        },
+        "Random Forest": {
+            "accuracy": 0.5769,
+            "balanced_accuracy": 0.5224,
+            "precision": 0.5238,
+            "recall": 0.141,
+            "f1": 0.2222,
+            "roc_auc": 0.5244,
+            "confusion_matrix": [
+                [
+                    94,
+                    10
+                ],
+                [
+                    67,
+                    11
+                ]
+            ],
+            "threshold_used": 0.55
+        },
+        "XGBoost": {
+            "accuracy": 0.5769,
+            "balanced_accuracy": 0.5224,
+            "precision": 0.5238,
+            "recall": 0.141,
+            "f1": 0.2222,
+            "roc_auc": 0.5198,
+            "confusion_matrix": [
+                [
+                    94,
+                    10
+                ],
+                [
+                    67,
+                    11
+                ]
+            ],
+            "threshold_used": 0.45
+        }
+    }
+}

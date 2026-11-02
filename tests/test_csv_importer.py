@@ -6,17 +6,6 @@ from src.data_collection.csv_importer import import_csv_file, parse_date, parse_
 from src.config.database import SessionLocal, engine
 from src.database.models import Instrument, DailyPrice
 
-@pytest.fixture(autouse=True)
-def clean_test_db():
-    db = SessionLocal()
-    try:
-        db.query(DailyPrice).delete()
-        db.query(Instrument).delete()
-        db.commit()
-    finally:
-        db.close()
-    yield
-
 def create_synthetic_csv(tmp_path, filename, header, rows):
     file_path = tmp_path / filename
     with open(file_path, "w", encoding="utf-8", newline="") as f:

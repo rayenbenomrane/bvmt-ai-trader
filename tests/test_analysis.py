@@ -8,17 +8,6 @@ from src.analysis.volatility_analysis import analyze_volatility
 from src.config.database import SessionLocal
 from src.database.models import Instrument, DailyPrice
 
-@pytest.fixture(autouse=True)
-def clean_db():
-    db = SessionLocal()
-    try:
-        db.query(DailyPrice).delete()
-        db.query(Instrument).delete()
-        db.commit()
-    finally:
-        db.close()
-    yield
-
 def seed_test_data(db, symbol, prices_data):
     inst = db.query(Instrument).filter_by(symbol=symbol).first()
     if not inst:
