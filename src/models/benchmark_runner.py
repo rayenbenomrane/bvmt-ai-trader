@@ -26,6 +26,10 @@ from src.models.ml_predictor import (
     get_benchmark_models,
     train_and_select_model,
     evaluate_predictions,
+    chronological_walk_forward_cv,
+    _mean_walk_forward_auc,
+    MIN_EDGE_AUC,
+    MAX_FOLD_STD,
 )
 from src.simulator.trading_simulator import (
     TradingSimulator,
@@ -95,13 +99,7 @@ def _probabilities(model: Any, X: pd.DataFrame) -> np.ndarray:
 
 
 def _simulation_summary(result: Dict[str, Any]) -> Dict[str, Any]:
-    """Extract a stable trading-metrics block, tolerant of missing keys.
-
-    Handles three cases:
-      1. Raw TradingSimulator output (has `final_portfolio_value`).
-      2. Aggregated window output (has `final_portfolio_value_mean`).
-      3. Empty / NO_TRADE output (uses defaults).
-    """
+    """Extract a stable trading-metrics block, tolerant of missing keys."""
 
     def pick(key: str, default: Any = 0.0) -> Any:
         if not result:
@@ -139,11 +137,7 @@ def _validation_metrics_for_report(candidate: Dict[str, Any]) -> Optional[Dict[s
 
 
 def _aggregate_window_simulations(window_results: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """Aggregate multiple independent window simulations into a single block.
-
-    Returns BOTH raw (`final_portfolio_value`) and averaged (`*_mean`) keys so
-    downstream reporting code never crashes on missing keys.
-    """
+    """Aggregate multiple independent window simulations into a single block."""
     simulations = [item["simulation"] for item in window_results if item.get("simulation") is not None]
     if not simulations:
         return {
@@ -272,6 +266,50 @@ def _strategy_configurations(
     return configurations
 
 
+def _no_trade_report(
+    symbol: str,
+    initial_capital: float,
+    reason: str,
+    edge_summary_by_horizon: Dict[str, Any],
+    best_by_horizon: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Build the JSON report object for a stock that failed the edge gate."""
+    return {
+        "symbol": symbol,
+        "status": "NO_TRADE",
+        "reason": reason,
+        "min_edge_auc": float(MIN_EDGE_AUC),
+        "max_fold_std": float(MAX_FOLD_STD),
+        "walk_forward_edge_by_horizon": edge_summary_by_horizon,
+        "best_model_per_horizon": best_by_horizon,
+        "recommendation": (
+            "Do not trade this stock. Collect additional features "
+            "(fundamentals, higher-frequency data, sector-relative signals) "
+            "or accept that current data does not support an exploitable edge."
+        ),
+        "benchmarks": {
+            "cash_test": {
+                "final_portfolio_value": initial_capital,
+                "return_pct": 0.0,
+            },
+        },
+        "selected_configuration": {
+            "status": "NO_TRADE",
+            "horizon": None,
+            "target": None,
+            "model": None,
+            "strategy": None,
+            "test_trading_metrics": {
+                "final_portfolio_value": initial_capital,
+                "total_return_pct": 0.0,
+                "total_orders": 0,
+                "closed_trades": 0,
+                "max_drawdown_pct": 0.0,
+            },
+        },
+    }
+
+
 def run_benchmark_for_symbol(
     symbol: str,
     initial_capital: float = 10000.0,
@@ -279,8 +317,19 @@ def run_benchmark_for_symbol(
     min_validation_closed_trades: int = 10,
     stop_loss_pct: Optional[float] = None,
     tunindex_csv_path: Optional[str] = None,
+    require_stable_edge: bool = True,
 ) -> Dict[str, Any]:
-    """Select horizon/model/strategy exclusively on validation, then report test results."""
+    """Select horizon/model/strategy exclusively on validation, then report test results.
+
+    Two gates protect the system:
+      1. Edge gate — at least one (horizon, model) pair must have BOTH
+         mean walk-forward AUC >= MIN_EDGE_AUC AND fold std <= MAX_FOLD_STD.
+      2. Strategy quality gate — the *selected* candidate must have
+         validation score >= 0, validation excess return > 0, and
+         validation AUC >= MIN_EDGE_AUC.
+    If either gate fails, the function returns a NO_TRADE report and
+    never touches the test set.
+    """
     db = SessionLocal()
     try:
         query = (
@@ -327,6 +376,90 @@ def run_benchmark_for_symbol(
         print(f"==========================================")
         print(f" TUNINDEX rows            : {market_status['rows']}")
 
+        # ================================================================
+        # GATE 1 — EDGE GATE
+        # ================================================================
+        if require_stable_edge:
+            edge_summary_by_horizon: Dict[str, Any] = {}
+            best_by_horizon: Dict[str, Any] = {}
+            any_horizon_has_edge = False
+
+            for _h in (1, 3, 5):
+                try:
+                    _df_h = prepare_labeled_dataset(
+                        df_raw, horizon=_h, market_df=market_df
+                    )
+                except Exception as exc:
+                    edge_summary_by_horizon[str(_h)] = {"error": str(exc)}
+                    continue
+                if (
+                    _df_h.empty
+                    or "target_binary" not in _df_h.columns
+                    or len(_df_h) < 50
+                ):
+                    edge_summary_by_horizon[str(_h)] = {
+                        "status": "insufficient_rows",
+                        "rows": 0 if _df_h is None else len(_df_h),
+                    }
+                    continue
+
+                _feat_cols = get_available_feature_columns(_df_h)
+                _wf = chronological_walk_forward_cv(
+                    _df_h[_feat_cols], _df_h["target_binary"], n_splits=3
+                )
+                _summary = _mean_walk_forward_auc(_wf)
+                edge_summary_by_horizon[str(_h)] = _summary
+
+                if _summary:
+                    _best_name = max(_summary, key=lambda n: _summary[n]["mean"])
+                    best_by_horizon[str(_h)] = {
+                        "model": _best_name,
+                        **_summary[_best_name],
+                    }
+                    if _summary[_best_name]["is_stable"]:
+                        any_horizon_has_edge = True
+
+            if not any_horizon_has_edge:
+                reason = (
+                    "No model has BOTH mean walk-forward validation AUC >= "
+                    f"{MIN_EDGE_AUC:.2f} AND fold-to-fold AUC std <= "
+                    f"{MAX_FOLD_STD:.2f} on any of the 1/3/5-session horizons."
+                )
+                report = _no_trade_report(
+                    symbol=symbol,
+                    initial_capital=initial_capital,
+                    reason=reason,
+                    edge_summary_by_horizon=edge_summary_by_horizon,
+                    best_by_horizon=best_by_horizon,
+                )
+                report_dir = (
+                    Path(__file__).resolve().parents[2]
+                    / "data"
+                    / "processed"
+                    / "reports"
+                )
+                report_dir.mkdir(parents=True, exist_ok=True)
+                report_path = report_dir / f"{symbol}_benchmark_simulation.json"
+                with report_path.open("w", encoding="utf-8") as f:
+                    json.dump(report, f, indent=2, default=str)
+
+                print(f" [GATE 1: NO EDGE] {symbol} — {reason}")
+                for h_str in ("1", "3", "5"):
+                    info = best_by_horizon.get(h_str)
+                    if info is None:
+                        print(f"             (h={h_str}: not evaluated)")
+                        continue
+                    flag = "✅" if info["is_stable"] else "  "
+                    print(
+                        f"             {flag} h={h_str}: {info['model']:<22} "
+                        f"mean={info['mean']:.4f}  std={info['std']:.4f}"
+                    )
+                print(f"             Report : {report_path}")
+                return report
+
+        # ================================================================
+        # FULL STRATEGY SEARCH (edge gate passed)
+        # ================================================================
         common_labeled = prepare_labeled_dataset(df_raw, horizon=5, market_df=market_df)
         common_dates = common_labeled["date"].reset_index(drop=True)
         labeled_sets = {}
@@ -686,6 +819,42 @@ def run_benchmark_for_symbol(
             min_validation_closed_trades=min_validation_closed_trades,
         )
         excluded_candidate_count = len(candidates) - len(robust_candidates)
+
+        # ================================================================
+        # GATE 2 — STRATEGY QUALITY GATE
+        # ================================================================
+        # Even if some model had a stable CV AUC in gate 1, the *selected*
+        # strategy might be garbage. Reject it if any of these fail:
+        #   * validation score < 0
+        #   * validation excess return vs buy-and-hold <= 0
+        #   * validation AUC < MIN_EDGE_AUC
+        if selected is not None:
+            _val_score = float(selected["validation_score"]["score"])
+            _val_excess = float(selected["validation_score"]["excess_return_pct"])
+            _val_auc = 0.0
+            if selected.get("validation_metrics"):
+                _val_auc = float(selected["validation_metrics"].get("roc_auc", 0.0))
+
+            _reasons = []
+            if _val_score < 0:
+                _reasons.append(f"validation_score={_val_score:.4f} < 0")
+            if _val_excess <= 0:
+                _reasons.append(
+                    f"excess_return_vs_buy_and_hold={_val_excess:.4f}% <= 0"
+                )
+            if _val_auc < MIN_EDGE_AUC:
+                _reasons.append(
+                    f"validation_auc={_val_auc:.4f} < {MIN_EDGE_AUC:.2f}"
+                )
+            if _reasons:
+                print(
+                    f" [GATE 2: STRATEGY REJECTED] {'; '.join(_reasons)}"
+                )
+                selected = None
+        # ================================================================
+        # END GATE 2
+        # ================================================================
+
         is_no_trade = selected is None
         if is_no_trade:
             cash_validation_windows = []
@@ -760,7 +929,7 @@ def run_benchmark_for_symbol(
                 "config_key": "NO_TRADE",
             }
             tie_break_used = (
-                "no candidate met validation trade and robustness criteria"
+                "no candidate met validation trade, robustness, or quality criteria"
             )
 
         validation_edge = {
@@ -785,7 +954,6 @@ def run_benchmark_for_symbol(
             ),
         }
 
-        # Fit once on pre-test history only; keep that model fixed over disjoint test windows.
         def evaluate_test_windows(
             data: pd.DataFrame,
             target_col: str,
@@ -1028,6 +1196,9 @@ def run_benchmark_for_symbol(
                 "minimum_validation_legacy_win_rate": min_validation_legacy_win_rate,
                 "stop_loss_pct": stop_loss_pct,
                 "test_used_for_selection": False,
+                "require_stable_edge": require_stable_edge,
+                "min_edge_auc": float(MIN_EDGE_AUC),
+                "max_fold_std": float(MAX_FOLD_STD),
                 "validation_window_signal_dates": validation_window_ranges,
                 "test_window_signal_dates": [
                     {
@@ -1068,9 +1239,9 @@ def run_benchmark_for_symbol(
                 "minimum_validation_legacy_win_rate": min_validation_legacy_win_rate,
                 "candidates_excluded_for_minimum_trades": excluded_candidate_count,
                 "candidates_excluded_by_horizon": excluded_by_horizon,
-                "selection_status": "NO_TRADE: no candidate met validation robustness criteria"
+                "selection_status": "NO_TRADE: no candidate met validation trade, robustness, or quality criteria"
                 if is_no_trade
-                else "selected candidate met validation robustness criteria",
+                else "selected candidate met validation trade, robustness, and quality criteria",
                 "best_by_horizon": best_validation_by_horizon,
                 "best_by_maximum_holding_period": best_validation_by_max_hold,
                 "edge_assessment": validation_edge,
@@ -1210,7 +1381,12 @@ def main():
     }
     for result in results:
         if result.get("status"):
-            comparison["stocks"][result["symbol"]] = {"status": result["status"]}
+            comparison["stocks"][result["symbol"]] = {
+                "status": result["status"],
+                "reason": result.get("reason"),
+                "min_edge_auc": result.get("min_edge_auc"),
+                "max_fold_std": result.get("max_fold_std"),
+            }
             continue
         selected = result["selected_configuration"]
         comparison["stocks"][result["symbol"]] = {

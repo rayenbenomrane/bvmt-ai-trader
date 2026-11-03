@@ -1,0 +1,291 @@
+{
+    "symbol": "SFBT",
+    "selected_model": "Majority Baseline",
+    "selected_threshold": 0.5,
+    "created_at": "2026-11-03T17:38:35.826912+00:00",
+    "date_ranges": {
+        "train": [
+            "2023-03-10",
+            "2025-05-12"
+        ],
+        "val": [
+            "2025-05-15",
+            "2026-02-02"
+        ],
+        "test": [
+            "2026-02-05",
+            "2026-10-29"
+        ]
+    },
+    "sample_counts": {
+        "train": 542,
+        "val": 180,
+        "test": 182
+    },
+    "features": [
+        "return_1d",
+        "return_2d",
+        "return_3d",
+        "return_5d",
+        "volatility_5d",
+        "volatility_20d",
+        "dist_sma20",
+        "dist_sma50",
+        "volume_rel_20",
+        "rsi_14",
+        "rsi_14_diff",
+        "macd_norm",
+        "macd_hist_norm",
+        "macd_hist_diff",
+        "ema12_ema26_ratio",
+        "norm_range",
+        "norm_close_pos",
+        "atr14_norm"
+    ],
+    "horizon_sessions": 1,
+    "target_column": "target_binary",
+    "validation_evaluations": {
+        "Majority Baseline": {
+            "accuracy": 0.5611,
+            "balanced_accuracy": 0.5,
+            "precision": 0.0,
+            "recall": 0.0,
+            "f1": 0.0,
+            "roc_auc": 0.5,
+            "confusion_matrix": [
+                [
+                    101,
+                    0
+                ],
+                [
+                    79,
+                    0
+                ]
+            ],
+            "selected_threshold": 0.5,
+            "threshold_sweep": [
+                {
+                    "threshold": 0.5,
+                    "balanced_accuracy": 0.5,
+                    "f1": 0.0
+                },
+                {
+                    "threshold": 0.55,
+                    "balanced_accuracy": 0.5,
+                    "f1": 0.0
+                },
+                {
+                    "threshold": 0.6,
+                    "balanced_accuracy": 0.5,
+                    "f1": 0.0
+                },
+                {
+                    "threshold": 0.65,
+                    "balanced_accuracy": 0.5,
+                    "f1": 0.0
+                }
+            ]
+        },
+        "Logistic Regression": {
+            "accuracy": 0.5611,
+            "balanced_accuracy": 0.5,
+            "precision": 0.0,
+            "recall": 0.0,
+            "f1": 0.0,
+            "roc_auc": 0.489,
+            "confusion_matrix": [
+                [
+                    101,
+                    0
+                ],
+                [
+                    79,
+                    0
+                ]
+            ],
+            "selected_threshold": 0.65,
+            "threshold_sweep": [
+                {
+                    "threshold": 0.5,
+                    "balanced_accuracy": 0.494,
+                    "f1": 0.1942
+                },
+                {
+                    "threshold": 0.55,
+                    "balanced_accuracy": 0.4731,
+                    "f1": 0.0449
+                },
+                {
+                    "threshold": 0.6,
+                    "balanced_accuracy": 0.495,
+                    "f1": 0.0
+                },
+                {
+                    "threshold": 0.65,
+                    "balanced_accuracy": 0.5,
+                    "f1": 0.0
+                }
+            ]
+        },
+        "Random Forest": {
+            "accuracy": 0.55,
+            "balanced_accuracy": 0.4997,
+            "precision": 0.4375,
+            "recall": 0.0886,
+            "f1": 0.1474,
+            "roc_auc": 0.4418,
+            "confusion_matrix": [
+                [
+                    92,
+                    9
+                ],
+                [
+                    72,
+                    7
+                ]
+            ],
+            "selected_threshold": 0.6,
+            "threshold_sweep": [
+                {
+                    "threshold": 0.5,
+                    "balanced_accuracy": 0.4724,
+                    "f1": 0.4607
+                },
+                {
+                    "threshold": 0.55,
+                    "balanced_accuracy": 0.4704,
+                    "f1": 0.2857
+                },
+                {
+                    "threshold": 0.6,
+                    "balanced_accuracy": 0.4997,
+                    "f1": 0.1474
+                },
+                {
+                    "threshold": 0.65,
+                    "balanced_accuracy": 0.4901,
+                    "f1": 0.0
+                }
+            ]
+        },
+        "XGBoost": {
+            "accuracy": 0.55,
+            "balanced_accuracy": 0.4929,
+            "precision": 0.3333,
+            "recall": 0.0253,
+            "f1": 0.0471,
+            "roc_auc": 0.4281,
+            "confusion_matrix": [
+                [
+                    97,
+                    4
+                ],
+                [
+                    77,
+                    2
+                ]
+            ],
+            "selected_threshold": 0.65,
+            "threshold_sweep": [
+                {
+                    "threshold": 0.5,
+                    "balanced_accuracy": 0.4511,
+                    "f1": 0.3165
+                },
+                {
+                    "threshold": 0.55,
+                    "balanced_accuracy": 0.4544,
+                    "f1": 0.1802
+                },
+                {
+                    "threshold": 0.6,
+                    "balanced_accuracy": 0.4758,
+                    "f1": 0.086
+                },
+                {
+                    "threshold": 0.65,
+                    "balanced_accuracy": 0.4929,
+                    "f1": 0.0471
+                }
+            ]
+        }
+    },
+    "test_evaluations": {
+        "Majority Baseline": {
+            "accuracy": 0.5604,
+            "balanced_accuracy": 0.5,
+            "precision": 0.0,
+            "recall": 0.0,
+            "f1": 0.0,
+            "roc_auc": 0.5,
+            "confusion_matrix": [
+                [
+                    102,
+                    0
+                ],
+                [
+                    80,
+                    0
+                ]
+            ],
+            "threshold_used": 0.5
+        },
+        "Logistic Regression": {
+            "accuracy": 0.5604,
+            "balanced_accuracy": 0.5,
+            "precision": 0.0,
+            "recall": 0.0,
+            "f1": 0.0,
+            "roc_auc": 0.4919,
+            "confusion_matrix": [
+                [
+                    102,
+                    0
+                ],
+                [
+                    80,
+                    0
+                ]
+            ],
+            "threshold_used": 0.65
+        },
+        "Random Forest": {
+            "accuracy": 0.5604,
+            "balanced_accuracy": 0.5162,
+            "precision": 0.5,
+            "recall": 0.15,
+            "f1": 0.2308,
+            "roc_auc": 0.4668,
+            "confusion_matrix": [
+                [
+                    90,
+                    12
+                ],
+                [
+                    68,
+                    12
+                ]
+            ],
+            "threshold_used": 0.6
+        },
+        "XGBoost": {
+            "accuracy": 0.5549,
+            "balanced_accuracy": 0.5005,
+            "precision": 0.4444,
+            "recall": 0.05,
+            "f1": 0.0899,
+            "roc_auc": 0.4627,
+            "confusion_matrix": [
+                [
+                    97,
+                    5
+                ],
+                [
+                    76,
+                    4
+                ]
+            ],
+            "threshold_used": 0.65
+        }
+    }
+}
