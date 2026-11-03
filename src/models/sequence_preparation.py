@@ -19,7 +19,9 @@ from sqlalchemy.orm import Session
 
 from src.models.feature_engineering import (
     FEATURE_COLUMNS,
+    get_available_feature_columns,
     prepare_labeled_dataset,
+    purged_chronological_splits,
 )
 from src.database.models import DailyPrice
 
@@ -137,7 +139,6 @@ def prepare_sequences_for_stock(
     df_clean = prepare_labeled_dataset(df_raw, horizon=horizon, market_df=market_df)
     target_columns = {
         "binary": "target_binary",
-        "cost_aware": "target_cost_aware",
         "3class": "target_3class",
         "legacy_1d": "target_legacy_1d",
     }
@@ -147,10 +148,17 @@ def prepare_sequences_for_stock(
     feature_columns = get_available_feature_columns(df_clean)
 
     total_len = len(df_clean)
-    train_end = int(total_len * train_ratio)
-    val_end = int(total_len * (train_ratio + val_ratio))
-    train_stop = max(0, train_end - horizon)
-    val_stop = max(train_end, val_end - horizon)
+    split = purged_chronological_splits(
+        total_len,
+        horizon,
+        train_ratio,
+        val_ratio,
+        legacy_target=target_col == "target_legacy_1d",
+    )
+    train_end = split["train_end"]
+    val_end = split["test_start"]
+    train_stop = split["train_stop"]
+    val_stop = split["validation_stop"]
     if train_stop < sequence_length or val_stop <= train_end or total_len <= val_end:
         raise ValueError("Insufficient samples after purging horizon-overlapping sequence labels.")
 

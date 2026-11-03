@@ -17,7 +17,9 @@ from src.models.feature_engineering import (
     build_features,
     prepare_labeled_dataset,
     compute_rsi,
-    round_trip_cost_return,
+    purged_chronological_splits,
+    rolling_walk_forward_plan,
+    rolling_walk_forward_plan,
 )
 
 
@@ -91,6 +93,7 @@ def test_target_alignment():
     np.testing.assert_array_equal(labeled["target_binary"], (expected_return > 0).astype(int))
     legacy_return = (labeled["next_close"] - labeled["close"]) / labeled["close"]
     np.testing.assert_array_equal(labeled["target_legacy_1d"], (legacy_return > 0).astype(int))
+    assert "target_cost_aware" not in labeled.columns
 
 
 def test_horizon_uses_trading_rows_and_drops_unavailable_targets():
@@ -112,10 +115,93 @@ def test_horizon_uses_trading_rows_and_drops_unavailable_targets():
         np.testing.assert_allclose(labeled["forward_return"], expected)
 
 
-def test_round_trip_cost_includes_both_sides_and_compounding():
-    actual = round_trip_cost_return(fee_rate=0.004, slippage_pct=0.001)
-    expected = ((1.001 * 1.004) / (0.999 * 0.996)) - 1.0
-    assert actual == pytest.approx(expected)
+@pytest.mark.parametrize("horizon", [1, 3, 5])
+def test_purged_splits_keep_label_endpoints_inside_partition(horizon):
+    splits = purged_chronological_splits(total_samples=200, horizon=horizon)
+    train_end = splits["train_end"]
+    validation_end = splits["test_start"]
+
+    for signal_index in range(splits["train"].start, splits["train"].stop):
+        assert signal_index + horizon + 1 < train_end
+    for signal_index in range(splits["validation"].start, splits["validation"].stop):
+        assert signal_index + horizon + 1 < validation_end
+
+
+def test_horizon_candidates_share_signal_dates_and_split_boundaries():
+    raw = create_synthetic_ohlcv(180)
+    labeled_by_horizon = {
+        horizon: prepare_labeled_dataset(raw, horizon=horizon)
+        for horizon in (1, 3, 5)
+    }
+    common_end = min(frame["date"].max() for frame in labeled_by_horizon.values())
+    aligned_dates = [
+        frame.loc[frame["date"] <= common_end, "date"].reset_index(drop=True)
+        for frame in labeled_by_horizon.values()
+    ]
+    assert aligned_dates[0].equals(aligned_dates[1])
+    assert aligned_dates[1].equals(aligned_dates[2])
+
+    splits = [
+        purged_chronological_splits(
+            len(aligned_dates[0]),
+            horizon=horizon,
+            purge_horizon=5,
+        )
+        for horizon in (1, 3, 5)
+    ]
+    for split in splits[1:]:
+        assert split["train"] == splits[0]["train"]
+        assert split["validation"] == splits[0]["validation"]
+        assert split["test"] == splits[0]["test"]
+
+
+def test_walk_forward_plan_has_prior_only_training_and_heldout_test_windows():
+    plan = rolling_walk_forward_plan(total_samples=250)
+    validations = plan["validation_windows"]
+    tests = plan["test_windows"]
+
+    assert len(validations) == 4
+    assert len(tests) == 3
+    for window in validations:
+        split = purged_chronological_splits(
+            total_samples=250,
+            horizon=5,
+            purge_horizon=5,
+            split_boundaries=window,
+        )
+        assert split["train"].stop + 6 <= window["train_end"]
+        assert split["validation"].stop + 6 <= window["validation_end"]
+        assert window["validation_end"] <= tests[0]["test_start"]
+
+    assert all(left["test_end"] == right["test_start"] for left, right in zip(tests, tests[1:]))
+
+
+def test_rolling_plan_is_chronological_disjoint_and_horizon_purged():
+    plan = rolling_walk_forward_plan(total_samples=200)
+    validation_windows = plan["validation_windows"]
+    test_windows = plan["test_windows"]
+
+    assert len(validation_windows) == 4
+    assert len(test_windows) == 3
+    assert all(
+        left["train_end"] < right["train_end"]
+        for left, right in zip(validation_windows, validation_windows[1:])
+    )
+    assert validation_windows[-1]["validation_end"] == test_windows[0]["test_start"]
+    assert all(
+        left["test_end"] == right["test_start"]
+        for left, right in zip(test_windows, test_windows[1:])
+    )
+
+    for window in validation_windows:
+        split = purged_chronological_splits(
+            total_samples=200,
+            horizon=5,
+            purge_horizon=5,
+            split_boundaries=window,
+        )
+        assert split["train"].stop + 6 <= window["train_end"]
+        assert split["validation"].stop + 6 <= window["validation_end"]
 
 
 def test_market_features_align_only_to_current_or_prior_market_date():

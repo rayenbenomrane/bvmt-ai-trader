@@ -4,11 +4,11 @@ BVMT AI Trader - Realistic Trading Simulator & Backtester
 Implements rigorous, leak-free trading simulation for the Bourse de Tunis (BVMT):
 - Next-session execution (orders execute at session t+1 Open to eliminate look-ahead bias).
 - Distinct tracking of signal generation date (session t close) and execution date (session t+1 open).
-- Configurable transaction fee rate and execution slippage.
+- Price-only execution with no broker commissions or slippage.
 - Integer share accounting (no fictitious fractional shares on BVMT).
 - Exact cash, share quantity, and realized/unrealized P&L balance tracking.
-- Trade-level closed round-trip auditing (gross P&L, fees, net P&L, duration).
-- Buy-and-Hold benchmark with identical cost model, daily equity curve, and Buy & Hold Max Drawdown.
+- Trade-level closed round-trip auditing (gross and net P&L, duration).
+- Buy-and-Hold benchmark using identical dates, opening price, integer-share sizing, and daily equity curve.
 """
 
 from dataclasses import dataclass, field, asdict
@@ -20,8 +20,6 @@ import pandas as pd
 @dataclass
 class SimulationConfig:
     initial_capital: float = 10000.0
-    fee_rate: float = 0.0040  # 0.40% per trade execution (brokerage + exchange fee + VAT)
-    slippage_pct: float = 0.0010  # 0.10% slippage on fill
     execution_price: str = "open"  # "open" (next-session open execution) or "close"
     allow_fractional_shares: bool = False
     auto_close_at_end: bool = True  # Liquidate open position on final session close
@@ -38,11 +36,9 @@ class OrderExecutionRecord:
     shares: int
     fill_price: float
     gross_amount: float
-    fee: float
     total_amount: float
     cash_after: float
     reason: str = ""
-    slippage_cost: float = 0.0
 
 
 @dataclass
@@ -60,17 +56,11 @@ class ClosedTradeRecord:
     gross_proceeds: float
     gross_pnl: float
     gross_return_pct: float
-    entry_fee: float
-    exit_fee: float
-    total_fees: float
     net_pnl: float
     net_return_pct: float
     is_gross_win: bool
     is_net_win: bool
     exit_reason: str = "SELL_SIGNAL"
-    entry_slippage: float = 0.0
-    exit_slippage: float = 0.0
-    total_transaction_costs: float = 0.0
 
 
 class TradingSimulator:
@@ -131,8 +121,6 @@ class TradingSimulator:
         capital = self.config.initial_capital
         cash = capital
         shares: int = 0
-        total_fees = 0.0
-        total_slippage_cost = 0.0
         
         orders: List[OrderExecutionRecord] = []
         closed_trades: List[ClosedTradeRecord] = []
@@ -143,8 +131,6 @@ class TradingSimulator:
         # Current open position tracking for trade pairing
         open_trade_shares = 0
         open_entry_price = 0.0
-        open_entry_fee = 0.0
-        open_entry_slippage = 0.0
         open_entry_sig_date = None
         open_entry_exec_date = None
         open_entry_idx = 0
@@ -159,8 +145,8 @@ class TradingSimulator:
 
             # 1. Entry Execution: Signal generated at i (session t close) fills at session t+1 open
             if sig == 1 and shares == 0 and cash > 0:
-                fill_price = p_exec * (1.0 + self.config.slippage_pct)
-                effective_cost_per_share = fill_price * (1.0 + self.config.fee_rate)
+                fill_price = p_exec
+                effective_cost_per_share = fill_price
 
                 if self.config.allow_fractional_shares:
                     buy_shares = cash / effective_cost_per_share
@@ -169,18 +155,12 @@ class TradingSimulator:
 
                 if buy_shares > 0:
                     gross_cost = buy_shares * fill_price
-                    fee = gross_cost * self.config.fee_rate
-                    slippage_cost = buy_shares * (fill_price - p_exec)
-                    total_paid = gross_cost + fee
+                    total_paid = gross_cost
                     cash -= total_paid
                     shares += int(buy_shares) if not self.config.allow_fractional_shares else buy_shares
-                    total_fees += fee
-                    total_slippage_cost += slippage_cost
 
                     open_trade_shares = shares
                     open_entry_price = fill_price
-                    open_entry_fee = fee
-                    open_entry_slippage = slippage_cost
                     open_entry_sig_date = sig_dt
                     open_entry_exec_date = exec_dt
                     open_entry_idx = i
@@ -195,11 +175,9 @@ class TradingSimulator:
                             shares=int(buy_shares),
                             fill_price=round(fill_price, 4),
                             gross_amount=round(gross_cost, 4),
-                            fee=round(fee, 4),
                             total_amount=round(total_paid, 4),
                             cash_after=round(cash, 4),
                             reason="Long Entry (Signal 1)",
-                            slippage_cost=round(slippage_cost, 4),
                         )
                     )
 
@@ -213,21 +191,16 @@ class TradingSimulator:
                     daily_cash.append(cash)
                     daily_shares.append(shares)
                     continue
-                fill_price = p_exec * (1.0 - self.config.slippage_pct)
+                fill_price = p_exec
                 gross_proceeds = shares * fill_price
-                fee = gross_proceeds * self.config.fee_rate
-                slippage_cost = shares * (p_exec - fill_price)
-                net_received = gross_proceeds - fee
+                net_received = gross_proceeds
                 cash += net_received
-                total_fees += fee
-                total_slippage_cost += slippage_cost
 
                 # Construct ClosedTradeRecord
                 gross_pnl = (fill_price - open_entry_price) * shares
-                total_trade_fees = open_entry_fee + fee
-                net_pnl = gross_pnl - total_trade_fees
+                net_pnl = gross_pnl
                 gross_ret_pct = ((fill_price - open_entry_price) / open_entry_price) * 100.0
-                capital_at_risk = (open_entry_price * shares) + open_entry_fee
+                capital_at_risk = open_entry_price * shares
                 net_ret_pct = (net_pnl / capital_at_risk) * 100.0
 
                 closed_trades.append(
@@ -245,17 +218,11 @@ class TradingSimulator:
                         gross_proceeds=round(gross_proceeds, 3),
                         gross_pnl=round(gross_pnl, 3),
                         gross_return_pct=round(gross_ret_pct, 2),
-                        entry_fee=round(open_entry_fee, 3),
-                        exit_fee=round(fee, 3),
-                        total_fees=round(total_trade_fees, 3),
                         net_pnl=round(net_pnl, 3),
                         net_return_pct=round(net_ret_pct, 2),
                         is_gross_win=gross_pnl > 0,
                         is_net_win=net_pnl > 0,
                         exit_reason=exit_reason,
-                        entry_slippage=round(open_entry_slippage, 3),
-                        exit_slippage=round(slippage_cost, 3),
-                        total_transaction_costs=round(total_trade_fees + open_entry_slippage + slippage_cost, 3),
                     )
                 )
 
@@ -269,11 +236,9 @@ class TradingSimulator:
                         shares=int(shares),
                         fill_price=round(fill_price, 4),
                         gross_amount=round(gross_proceeds, 4),
-                        fee=round(fee, 4),
                         total_amount=round(net_received, 4),
                         cash_after=round(cash, 4),
                         reason=exit_reason,
-                        slippage_cost=round(slippage_cost, 4),
                     )
                 )
 
@@ -289,20 +254,15 @@ class TradingSimulator:
         # 4. Handle any remaining open position at end of simulation if configured
         if shares > 0 and self.config.auto_close_at_end:
             p_final = float(close_prices.iloc[-1] if hasattr(close_prices, "iloc") else close_prices[-1])
-            fill_price = p_final * (1.0 - self.config.slippage_pct)
+            fill_price = p_final
             gross_proceeds = shares * fill_price
-            fee = gross_proceeds * self.config.fee_rate
-            slippage_cost = shares * (p_final - fill_price)
-            net_received = gross_proceeds - fee
+            net_received = gross_proceeds
             cash += net_received
-            total_fees += fee
-            total_slippage_cost += slippage_cost
 
             gross_pnl = (fill_price - open_entry_price) * shares
-            total_trade_fees = open_entry_fee + fee
-            net_pnl = gross_pnl - total_trade_fees
+            net_pnl = gross_pnl
             gross_ret_pct = ((fill_price - open_entry_price) / open_entry_price) * 100.0
-            capital_at_risk = (open_entry_price * shares) + open_entry_fee
+            capital_at_risk = open_entry_price * shares
             net_ret_pct = (net_pnl / capital_at_risk) * 100.0
 
             closed_trades.append(
@@ -320,17 +280,11 @@ class TradingSimulator:
                     gross_proceeds=round(gross_proceeds, 3),
                     gross_pnl=round(gross_pnl, 3),
                     gross_return_pct=round(gross_ret_pct, 2),
-                    entry_fee=round(open_entry_fee, 3),
-                    exit_fee=round(fee, 3),
-                    total_fees=round(total_trade_fees, 3),
                     net_pnl=round(net_pnl, 3),
                     net_return_pct=round(net_ret_pct, 2),
                     is_gross_win=gross_pnl > 0,
                     is_net_win=net_pnl > 0,
                     exit_reason="END_OF_TEST",
-                    entry_slippage=round(open_entry_slippage, 3),
-                    exit_slippage=round(slippage_cost, 3),
-                    total_transaction_costs=round(total_trade_fees + open_entry_slippage + slippage_cost, 3),
                 )
             )
             shares = 0
@@ -346,10 +300,10 @@ class TradingSimulator:
         drawdowns = (equity_with_start - rolling_peak) / rolling_peak
         max_drawdown_pct = float(drawdowns.min() * 100.0) if not drawdowns.empty else 0.0
 
-        # Buy-and-Hold Benchmark: identical entry assumptions, cost model, and daily equity curve
+        # Buy-and-Hold uses the same first next-session open and integer-share convention.
         first_exec = float(exec_prices.iloc[0] if hasattr(exec_prices, "iloc") else exec_prices[0])
-        bh_fill_price = first_exec * (1.0 + self.config.slippage_pct)
-        bh_cost_per_share = bh_fill_price * (1.0 + self.config.fee_rate)
+        bh_fill_price = first_exec
+        bh_cost_per_share = bh_fill_price
 
         if self.config.allow_fractional_shares:
             bh_shares = capital / bh_cost_per_share
@@ -391,15 +345,11 @@ class TradingSimulator:
             "total_orders": len(orders),
             "closed_trades": n_closed,
             "gross_win_rate_pct": round(float(gross_win_rate), 2),
+            "gross_win_rate_basis": "price-only, no commissions or slippage",
             "net_win_rate_pct": round(float(net_win_rate), 2),
             "total_gross_pnl": round(float(total_gross_pnl), 3),
             "total_net_pnl": round(float(total_net_pnl), 3),
-            "total_fees_paid": round(float(total_fees), 3),
-            "total_slippage_cost": round(float(total_slippage_cost), 3),
-            "total_transaction_costs": round(float(total_fees + total_slippage_cost), 3),
             "average_holding_sessions": round(float(avg_holding_sessions), 2),
-            "fee_rate": self.config.fee_rate,
-            "slippage_pct": self.config.slippage_pct,
             "equity_curve": portfolio_values,
             "bh_equity_curve": bh_equity_curve,
             "orders": [asdict(o) for o in orders],

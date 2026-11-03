@@ -11,7 +11,11 @@ from src.models.sequence_preparation import (
     create_sliding_sequences,
     prepare_sequences_for_stock,
 )
-from src.models.feature_engineering import FEATURE_COLUMNS, prepare_labeled_dataset
+from src.models.feature_engineering import (
+    FEATURE_COLUMNS,
+    prepare_labeled_dataset,
+    purged_chronological_splits,
+)
 
 
 def generate_synthetic_stock_history(n_days: int = 200, seed: int = 42) -> pd.DataFrame:
@@ -113,7 +117,7 @@ def test_sequence_scaler_uses_training_rows_only():
     assert dataset.X_val.shape[1] == 20
     assert dataset.X_test.shape[1] == 20
     labeled = prepare_labeled_dataset(df)
-    train_stop = int(len(labeled) * 0.6) - 1
+    train_stop = purged_chronological_splits(len(labeled), horizon=1)["train_stop"]
     expected_mean = labeled[FEATURE_COLUMNS].iloc[:train_stop].mean().to_numpy()
     np.testing.assert_allclose(dataset.scaler.mean_, expected_mean)
 

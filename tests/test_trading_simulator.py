@@ -19,20 +19,22 @@ from src.simulator.trading_simulator import (
     OrderExecutionRecord,
     ClosedTradeRecord,
 )
-from src.simulator.strategy import build_strategy_actions, score_validation_configuration
+from src.simulator.strategy import (
+    assess_validation_edge,
+    build_strategy_actions,
+    meets_validation_robustness_criteria,
+    score_validation_configuration,
+    select_validation_candidate,
+)
 
 
-def test_transaction_cost_and_slippage_accuracy():
-    """Confirms fee and slippage apply on entries and exits without double counting."""
+def test_price_only_fills_have_no_commissions_or_slippage():
+    """Buy and sell cash movements equal the unadjusted execution amounts."""
     initial_cash = 10000.0
-    fee_rate = 0.0040  # 0.40%
-    slippage = 0.0010  # 0.10%
     open_price = 10.0
 
     sim = TradingSimulator(SimulationConfig(
         initial_capital=initial_cash,
-        fee_rate=fee_rate,
-        slippage_pct=slippage,
         allow_fractional_shares=False,
     ))
 
@@ -56,39 +58,32 @@ def test_transaction_cost_and_slippage_accuracy():
     buy_order = orders[0]
     sell_order = orders[1]
 
-    # Verify BUY math
-    expected_buy_fill = open_price * (1.0 + slippage)  # 10.010
-    expected_cost_per_share = expected_buy_fill * (1.0 + fee_rate)  # 10.05004
-    expected_shares = int(initial_cash // expected_cost_per_share)  # 995 shares
-    expected_buy_gross = expected_shares * expected_buy_fill  # 995 * 10.010 = 9959.95
-    expected_buy_fee = expected_buy_gross * fee_rate  # 39.8398
-    expected_cash_after_buy = initial_cash - (expected_buy_gross + expected_buy_fee)
+    expected_shares = int(initial_cash // open_price)
+    expected_cash_after_buy = initial_cash - expected_shares * open_price
 
     assert buy_order["shares"] == expected_shares
-    assert pytest.approx(buy_order["fill_price"], 0.0001) == expected_buy_fill
-    assert pytest.approx(buy_order["fee"], 0.01) == expected_buy_fee
+    assert buy_order["fill_price"] == open_price
+    assert buy_order["total_amount"] == expected_shares * open_price
     assert pytest.approx(buy_order["cash_after"], 0.01) == expected_cash_after_buy
 
-    # Verify SELL math
     sell_open = 12.0
-    expected_sell_fill = sell_open * (1.0 - slippage)  # 11.988
-    expected_sell_gross = expected_shares * expected_sell_fill  # 995 * 11.988 = 11928.06
-    expected_sell_fee = expected_sell_gross * fee_rate  # 47.71224
-    expected_net_received = expected_sell_gross - expected_sell_fee
+    expected_sell_fill = sell_open
+    expected_sell_gross = expected_shares * expected_sell_fill
+    expected_net_received = expected_sell_gross
     expected_final_cash = expected_cash_after_buy + expected_net_received
 
     assert sell_order["shares"] == expected_shares
-    assert pytest.approx(sell_order["fill_price"], 0.0001) == expected_sell_fill
-    assert pytest.approx(sell_order["fee"], 0.01) == expected_sell_fee
+    assert sell_order["fill_price"] == expected_sell_fill
+    assert sell_order["total_amount"] == expected_sell_gross
     assert pytest.approx(sell_order["cash_after"], 0.01) == expected_final_cash
+    assert all(order["cash_after"] >= 0 for order in orders)
+    assert "fee" not in buy_order and "slippage_cost" not in buy_order
 
 
 def test_integer_shares_and_cash_conservation():
     """Confirms no fractional shares and exact conservation of cash balance."""
     sim = TradingSimulator(SimulationConfig(
         initial_capital=500.0,
-        fee_rate=0.0040,
-        slippage_pct=0.0010,
         allow_fractional_shares=False,
     ))
 
@@ -141,7 +136,7 @@ def test_drawdown_equals_loss_when_no_new_highs():
     exec_prices = pd.Series([10.0, 9.0, 8.0])
     close_prices = pd.Series([9.0, 8.0, 7.0])
 
-    sim = TradingSimulator(SimulationConfig(initial_capital=capital, fee_rate=0.0, slippage_pct=0.0, allow_fractional_shares=True))
+    sim = TradingSimulator(SimulationConfig(initial_capital=capital, allow_fractional_shares=True))
     res = sim.simulate(signals, dates, exec_prices, close_prices)
 
     # Initial peak is 10,000 at start. It never rises above 10,000.
@@ -160,7 +155,7 @@ def test_buy_and_hold_equity_curve_and_drawdown():
     exec_prices = pd.Series([10.0, 15.0, 9.0, 12.0])
     close_prices = pd.Series([10.0, 15.0, 9.0, 12.0])
 
-    sim = TradingSimulator(SimulationConfig(initial_capital=capital, fee_rate=0.0, slippage_pct=0.0, allow_fractional_shares=True))
+    sim = TradingSimulator(SimulationConfig(initial_capital=capital, allow_fractional_shares=True))
     res = sim.simulate(signals, dates, exec_prices, close_prices)
 
     # Strategy held cash
@@ -171,12 +166,10 @@ def test_buy_and_hold_equity_curve_and_drawdown():
     assert pytest.approx(res["buy_and_hold_max_drawdown_pct"], 0.01) == -40.0
 
 
-def test_closed_trade_audit_pnl_math():
-    """Confirms closed round-trip trade P&L matches: Net P&L = Gross P&L - Total Fees."""
+def test_closed_trade_pnl_and_portfolio_value_reconcile_without_costs():
+    """Gross and net P&L are equal when no commissions or slippage exist."""
     sim = TradingSimulator(SimulationConfig(
         initial_capital=10000.0,
-        fee_rate=0.0050,
-        slippage_pct=0.0010,
         allow_fractional_shares=False,
     ))
 
@@ -190,13 +183,60 @@ def test_closed_trade_audit_pnl_math():
     assert len(closed) == 1
     t = closed[0]
 
-    assert pytest.approx(t["net_pnl"], 0.01) == (t["gross_pnl"] - t["total_fees"])
+    assert t["net_pnl"] == t["gross_pnl"]
     assert t["is_net_win"] == (t["net_pnl"] > 0)
     assert t["holding_sessions"] == 1
+    assert res["gross_win_rate_basis"] == "price-only, no commissions or slippage"
+    assert res["total_net_pnl"] == res["total_gross_pnl"]
+    assert res["final_portfolio_value"] == pytest.approx(
+        res["initial_capital"] + res["total_net_pnl"], abs=0.01
+    )
+
+
+def test_minimum_holding_and_end_of_window_liquidation_exception():
+    actions = np.array([1, 0, -1])
+    dates = pd.date_range("2026-03-01", periods=3)
+    result = TradingSimulator(SimulationConfig(
+        initial_capital=10000.0,
+        minimum_holding_period=3,
+    )).simulate(
+        signals=np.zeros(3, dtype=int),
+        actions=actions,
+        exit_reasons=["", "", "SELL_SIGNAL"],
+        dates=dates,
+        exec_prices=pd.Series([10.0, 11.0, 12.0]),
+        close_prices=pd.Series([10.0, 11.0, 12.0]),
+    )
+
+    trade = result["closed_trades_records"][0]
+    assert trade["holding_sessions"] == 2
+    assert trade["exit_reason"] == "END_OF_TEST"
+
+
+def test_maximum_hold_exit_fills_at_next_open_and_counts_open_to_open_sessions():
+    dates = pd.date_range("2026-04-01", periods=5)
+    result = TradingSimulator(SimulationConfig(
+        initial_capital=10000.0,
+        minimum_holding_period=3,
+    )).simulate(
+        signals=np.zeros(5, dtype=int),
+        actions=np.array([1, 0, 0, -1, 0]),
+        exit_reasons=["", "", "", "MAX_HOLDING_PERIOD", ""],
+        dates=dates,
+        exec_prices=pd.Series([10.0, 11.0, 12.0, 13.0, 14.0]),
+        close_prices=pd.Series([10.0, 11.0, 12.0, 13.0, 14.0]),
+    )
+
+    sell = result["orders"][1]
+    trade = result["closed_trades_records"][0]
+    assert sell["execution_date"] == dates[3]
+    assert sell["fill_price"] == 13.0
+    assert trade["holding_sessions"] == 3
+    assert trade["exit_reason"] == "MAX_HOLDING_PERIOD"
 
 
 def test_hysteresis_holds_between_thresholds_and_enforces_minimum_period():
-    actions, reasons, rejections = build_strategy_actions(
+    actions, reasons = build_strategy_actions(
         probabilities=[0.70, 0.30, 0.30, 0.30, 0.70],
         signal_opens=[10, 10, 10, 10, 10],
         signal_closes=[10, 10, 10, 10, 10],
@@ -204,11 +244,10 @@ def test_hysteresis_holds_between_thresholds_and_enforces_minimum_period():
     )
     np.testing.assert_array_equal(actions, [1, 0, 0, -1, 1])
     assert reasons[3] == "SELL_SIGNAL"
-    assert rejections == []
 
 
 def test_stop_loss_uses_signal_close_and_max_hold_exits():
-    actions, reasons, _ = build_strategy_actions(
+    actions, reasons = build_strategy_actions(
         probabilities=[0.70, 0.70, 0.70, 0.70],
         signal_opens=[10, 10, 10, 10],
         signal_closes=[10, 10, 8.9, 10],
@@ -219,7 +258,7 @@ def test_stop_loss_uses_signal_close_and_max_hold_exits():
     assert actions[2] == -1
     assert reasons[2] == "STOP_LOSS"
 
-    actions, reasons, _ = build_strategy_actions(
+    actions, reasons = build_strategy_actions(
         probabilities=[0.70] * 5,
         signal_opens=[10] * 5,
         signal_closes=[10] * 5,
@@ -230,26 +269,135 @@ def test_stop_loss_uses_signal_close_and_max_hold_exits():
     assert reasons[3] == "MAX_HOLDING_PERIOD"
 
 
-def test_cost_filter_rejects_and_records_unprofitable_entry_estimate():
-    actions, _, rejections = build_strategy_actions(
-        probabilities=[0.80],
-        signal_opens=[10],
-        signal_closes=[10],
-        expected_returns=[0.01],
-        estimated_round_trip_cost=0.012,
-        safety_margin=0.002,
-        cost_filter=True,
-    )
-    assert actions[0] == 0
-    assert rejections[0]["predicted_probability"] == 0.8
-    assert rejections[0]["minimum_required_return"] == pytest.approx(0.014)
-
-
 def test_validation_score_uses_return_drawdown_and_trade_frequency():
     score = score_validation_configuration({
         "total_return_pct": 5.0,
+        "buy_and_hold_return_pct": 2.0,
         "max_drawdown_pct": -4.0,
         "closed_trades": 2,
     }, signal_count=100)
-    assert score["score"] == pytest.approx(2.8)
+    assert score["score"] == pytest.approx(0.8)
+    assert score["excess_return_pct"] == 3.0
     assert score["closed_trades_per_100_signals"] == 2.0
+
+
+def test_tied_validation_candidates_use_deterministic_simplicity_tiebreak():
+    shared = {
+        "validation_score": {"score": 6.643},
+        "validation_simulation": {
+            "closed_trades": 12,
+            "total_orders": 24,
+            "max_drawdown_pct": -4.0,
+        },
+        "horizon": 3,
+        "target_col": "target_binary",
+        "model_name": "Logistic Regression",
+    }
+    complex_candidate = {
+        **shared,
+        "config_key": "a-complex",
+        "strategy": {
+            "hysteresis": True,
+            "minimum_holding_period": 3,
+            "maximum_holding_period": 3,
+        },
+    }
+    simple_candidate = {
+        **shared,
+        "config_key": "z-simple",
+        "strategy": {
+            "hysteresis": False,
+            "minimum_holding_period": 0,
+            "maximum_holding_period": None,
+        },
+    }
+
+    selected, excluded, tie_break = select_validation_candidate(
+        [complex_candidate, simple_candidate]
+    )
+    assert selected is simple_candidate
+    assert excluded == 0
+    assert tie_break == "simpler strategy (no hysteresis)"
+
+
+def test_candidate_selection_ignores_test_metrics():
+    candidates = [
+        {
+            "validation_score": {"score": 2.0},
+            "validation_simulation": {
+                "closed_trades": 12,
+                "total_orders": 24,
+                "max_drawdown_pct": -4.0,
+            },
+            "test_return_pct": 1000.0,
+            "strategy": {"hysteresis": False, "minimum_holding_period": 0, "maximum_holding_period": None},
+            "config_key": "validation-worse-test-better",
+        },
+        {
+            "validation_score": {"score": 3.0},
+            "validation_simulation": {
+                "closed_trades": 12,
+                "total_orders": 24,
+                "max_drawdown_pct": -4.0,
+            },
+            "test_return_pct": -1000.0,
+            "strategy": {"hysteresis": False, "minimum_holding_period": 0, "maximum_holding_period": None},
+            "config_key": "validation-better-test-worse",
+        },
+    ]
+
+    selected, _, _ = select_validation_candidate(candidates)
+    assert selected is candidates[1]
+
+
+def test_validation_edge_assessment_flags_benchmark_underperformance():
+    candidates = [{
+        "validation_simulation": {"closed_trades": 10, "total_return_pct": 4.0},
+    }]
+    assessment = assess_validation_edge(
+        candidates,
+        buy_and_hold_return_pct=6.0,
+        legacy_return_pct=5.0,
+    )
+    assert assessment["no_candidate_beats_buy_and_hold"] is True
+    assert assessment["no_candidate_beats_legacy"] is True
+    assert assessment["best_validation_return_pct"] == 4.0
+
+    assessment = assess_validation_edge([], buy_and_hold_return_pct=0.0, legacy_return_pct=0.0)
+    assert assessment["eligible_candidate_count"] == 0
+    assert assessment["best_validation_return_pct"] is None
+    assert assessment["no_candidate_beats_buy_and_hold"] is True
+
+
+def test_robustness_gate_can_require_repeatable_benchmark_wins():
+    candidate = {
+        "validation_simulation": {"closed_trades": 12},
+        "validation_robustness": {"buy_and_hold_win_rate": 0.75, "legacy_win_rate": 0.50},
+    }
+    assert meets_validation_robustness_criteria(candidate)
+    candidate["validation_robustness"]["buy_and_hold_win_rate"] = 0.25
+    assert not meets_validation_robustness_criteria(candidate)
+    candidate["validation_robustness"]["buy_and_hold_win_rate"] = 1.0
+    candidate["validation_simulation"]["closed_trades"] = 9
+    assert not meets_validation_robustness_criteria(candidate)
+
+
+def test_minimum_validation_trades_excludes_candidates_and_allows_cash_fallback():
+    candidates = [{
+        "validation_score": {"score": 100.0},
+        "validation_simulation": {
+            "closed_trades": 9,
+            "total_orders": 18,
+            "max_drawdown_pct": -1.0,
+        },
+        "strategy": {"hysteresis": False, "minimum_holding_period": 0, "maximum_holding_period": None},
+    }]
+    selected, excluded, reason = select_validation_candidate(candidates)
+    assert selected is None
+    assert excluded == 1
+    assert "no reliable edge on validation" in reason
+
+    candidates[0]["validation_simulation"]["closed_trades"] = 10
+    selected, excluded, _ = select_validation_candidate(candidates)
+    assert selected is candidates[0]
+    assert excluded == 0

@@ -18,7 +18,7 @@ import pandas as pd
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import LogisticRegression
-from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
+from sklearn.ensemble import RandomForestClassifier
 from sklearn.dummy import DummyClassifier
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.metrics import (
@@ -44,6 +44,7 @@ from src.models.feature_engineering import (
     build_features,
     get_available_feature_columns,
     prepare_labeled_dataset,
+    purged_chronological_splits,
 )
 
 
@@ -176,6 +177,8 @@ def train_and_select_model(
     target_col: str = "target_binary",
     evaluate_test: bool = True,
     save_artifacts: bool = True,
+    purge_horizon: Optional[int] = None,
+    split_boundaries: Optional[Dict[str, int]] = None,
 ) -> Dict[str, Any]:
     """
     Strict, leak-free ML workflow:
@@ -186,36 +189,49 @@ def train_and_select_model(
     5. Evaluate the winning configuration on the unseen Test set ONCE.
     6. Persist models and structured metadata.
     """
-    if target_col not in {"target_binary", "target_cost_aware", "target_legacy_1d"}:
+    if target_col not in {"target_binary", "target_legacy_1d"}:
         raise ValueError(f"Unsupported target column: {target_col}")
     if horizon < 1:
         raise ValueError("horizon must be a positive number of trading sessions.")
 
     total = len(df_clean)
-    train_end = int(total * train_ratio)
-    val_end = int(total * (train_ratio + val_ratio))
+    split = purged_chronological_splits(
+        total,
+        horizon,
+        train_ratio,
+        val_ratio,
+        legacy_target=target_col == "target_legacy_1d",
+        purge_horizon=purge_horizon,
+        split_boundaries=split_boundaries,
+    )
+    train_end = split["train_end"]
+    val_end = split["test_start"]
     feature_columns = get_available_feature_columns(df_clean)
     X = df_clean[feature_columns]
     y = df_clean[target_col]
     dates = df_clean["date"]
 
-    # Open-to-open labels end at t+horizon+1; the legacy close target ends at t+1.
-    purge_periods = 1 if target_col == "target_legacy_1d" else horizon + 1
-    train_stop = max(0, train_end - purge_periods)
-    val_stop = max(train_end, val_end - purge_periods)
-    train_idx = slice(0, train_stop)
-    val_idx = slice(train_end, val_stop)
-    test_idx = slice(val_end, total)
+    train_stop = split["train_stop"]
+    val_stop = split["validation_stop"]
+    train_idx = split["train"]
+    val_idx = split["validation"]
+    test_idx = split["test"]
 
     X_train, y_train = X.iloc[train_idx], y.iloc[train_idx]
     X_val, y_val = X.iloc[val_idx], y.iloc[val_idx]
     X_test, y_test = X.iloc[test_idx], y.iloc[test_idx]
-    if min(len(X_train), len(X_val), len(X_test)) == 0:
+    required_split_lengths = [len(X_train), len(X_val)]
+    if evaluate_test:
+        required_split_lengths.append(len(X_test))
+    if min(required_split_lengths) == 0:
         raise ValueError("Chronological split is too small after purging horizon-overlapping labels.")
 
     dates_train = (dates.iloc[0], dates.iloc[train_stop - 1])
     dates_val = (dates.iloc[train_end], dates.iloc[val_stop - 1])
-    dates_test = (dates.iloc[val_end], dates.iloc[-1])
+    dates_test = (
+        (dates.iloc[test_idx.start], dates.iloc[test_idx.stop - 1])
+        if len(X_test) > 0 else ("N/A", "N/A")
+    )
 
     models = get_benchmark_models()
     val_evaluations = {}
@@ -227,14 +243,6 @@ def train_and_select_model(
 
     thresholds_to_test = [0.50, 0.55, 0.60, 0.65]
     validation_probabilities = {}
-    expected_return_model = RandomForestRegressor(
-        n_estimators=100,
-        max_depth=4,
-        min_samples_leaf=5,
-        random_state=42,
-    )
-    expected_return_model.fit(X_train, df_clean["forward_return"].iloc[train_idx])
-
     for name, model in models.items():
         model.fit(X_train, y_train)
         fitted_models[name] = model
@@ -335,7 +343,6 @@ def train_and_select_model(
         "best_model": fitted_models[best_model_name],
         "best_threshold": best_threshold,
         "fitted_models": fitted_models,
-        "expected_return_model": expected_return_model,
         "feature_columns": feature_columns,
         "horizon": horizon,
         "target_col": target_col,
