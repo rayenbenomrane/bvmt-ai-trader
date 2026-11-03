@@ -18,7 +18,7 @@ import pandas as pd
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import LogisticRegression
-from sklearn.ensemble import RandomForestClassifier
+from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 from sklearn.dummy import DummyClassifier
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.metrics import (
@@ -42,6 +42,7 @@ from src.database.models import DailyPrice
 from src.models.feature_engineering import (
     FEATURE_COLUMNS,
     build_features,
+    get_available_feature_columns,
     prepare_labeled_dataset,
 )
 
@@ -171,6 +172,10 @@ def train_and_select_model(
     train_ratio: float = 0.60,
     val_ratio: float = 0.20,
     save_dir: str = "models/saved",
+    horizon: int = 1,
+    target_col: str = "target_binary",
+    evaluate_test: bool = True,
+    save_artifacts: bool = True,
 ) -> Dict[str, Any]:
     """
     Strict, leak-free ML workflow:
@@ -181,20 +186,35 @@ def train_and_select_model(
     5. Evaluate the winning configuration on the unseen Test set ONCE.
     6. Persist models and structured metadata.
     """
+    if target_col not in {"target_binary", "target_cost_aware", "target_legacy_1d"}:
+        raise ValueError(f"Unsupported target column: {target_col}")
+    if horizon < 1:
+        raise ValueError("horizon must be a positive number of trading sessions.")
+
     total = len(df_clean)
     train_end = int(total * train_ratio)
     val_end = int(total * (train_ratio + val_ratio))
-
-    X = df_clean[FEATURE_COLUMNS]
-    y = df_clean["target_binary"]
+    feature_columns = get_available_feature_columns(df_clean)
+    X = df_clean[feature_columns]
+    y = df_clean[target_col]
     dates = df_clean["date"]
 
-    X_train, y_train = X.iloc[:train_end], y.iloc[:train_end]
-    X_val, y_val = X.iloc[train_end:val_end], y.iloc[train_end:val_end]
-    X_test, y_test = X.iloc[val_end:], y.iloc[val_end:]
+    # Open-to-open labels end at t+horizon+1; the legacy close target ends at t+1.
+    purge_periods = 1 if target_col == "target_legacy_1d" else horizon + 1
+    train_stop = max(0, train_end - purge_periods)
+    val_stop = max(train_end, val_end - purge_periods)
+    train_idx = slice(0, train_stop)
+    val_idx = slice(train_end, val_stop)
+    test_idx = slice(val_end, total)
 
-    dates_train = (dates.iloc[0], dates.iloc[train_end - 1])
-    dates_val = (dates.iloc[train_end], dates.iloc[val_end - 1])
+    X_train, y_train = X.iloc[train_idx], y.iloc[train_idx]
+    X_val, y_val = X.iloc[val_idx], y.iloc[val_idx]
+    X_test, y_test = X.iloc[test_idx], y.iloc[test_idx]
+    if min(len(X_train), len(X_val), len(X_test)) == 0:
+        raise ValueError("Chronological split is too small after purging horizon-overlapping labels.")
+
+    dates_train = (dates.iloc[0], dates.iloc[train_stop - 1])
+    dates_val = (dates.iloc[train_end], dates.iloc[val_stop - 1])
     dates_test = (dates.iloc[val_end], dates.iloc[-1])
 
     models = get_benchmark_models()
@@ -205,7 +225,15 @@ def train_and_select_model(
     best_val_f1 = -1.0
     best_threshold = 0.50
 
-    thresholds_to_test = [0.50, 0.52, 0.55, 0.58, 0.60]
+    thresholds_to_test = [0.50, 0.55, 0.60, 0.65]
+    validation_probabilities = {}
+    expected_return_model = RandomForestRegressor(
+        n_estimators=100,
+        max_depth=4,
+        min_samples_leaf=5,
+        random_state=42,
+    )
+    expected_return_model.fit(X_train, df_clean["forward_return"].iloc[train_idx])
 
     for name, model in models.items():
         model.fit(X_train, y_train)
@@ -215,6 +243,7 @@ def train_and_select_model(
             val_probs = model.predict_proba(X_val)[:, 1]
         else:
             val_probs = np.full(len(X_val), 0.5)
+        validation_probabilities[name] = val_probs
 
         # Sweep thresholds on validation data to maximize balanced accuracy
         best_th_for_model = 0.50
@@ -249,24 +278,29 @@ def train_and_select_model(
             best_model_name = name
             best_threshold = best_th_for_model
 
-    # Now evaluate all models on Test set (unseen)
+    # Test data is not scored during candidate search; the runner evaluates it once selection is complete.
     test_evaluations = {}
-    for name, model in fitted_models.items():
-        th = val_evaluations[name]["selected_threshold"]
-        if hasattr(model, "predict_proba"):
-            test_probs = model.predict_proba(X_test)[:, 1]
-        else:
-            test_probs = np.full(len(X_test), 0.5)
+    if evaluate_test:
+        for name, model in fitted_models.items():
+            th = val_evaluations[name]["selected_threshold"]
+            if hasattr(model, "predict_proba"):
+                test_probs = model.predict_proba(X_test)[:, 1]
+            else:
+                test_probs = np.full(len(X_test), 0.5)
 
-        test_preds = (test_probs >= th).astype(int)
-        test_evaluations[name] = evaluate_predictions(y_test, test_preds, test_probs)
-        test_evaluations[name]["threshold_used"] = th
+            test_preds = (test_probs >= th).astype(int)
+            test_evaluations[name] = evaluate_predictions(y_test, test_preds, test_probs)
+            test_evaluations[name]["threshold_used"] = th
 
     # Save best model and metadata
-    os.makedirs(save_dir, exist_ok=True)
-    slug = symbol.upper()
-    best_model_file = f"{save_dir}/{slug}_{best_model_name.lower().replace(' ', '_')}.joblib"
-    joblib.dump(fitted_models[best_model_name], best_model_file)
+    best_model_file = None
+    meta_file = None
+    if save_artifacts:
+        os.makedirs(save_dir, exist_ok=True)
+        slug = symbol.upper()
+        suffix = f"_{horizon}d_{target_col}"
+        best_model_file = f"{save_dir}/{slug}_{best_model_name.lower().replace(' ', '_')}{suffix}.joblib"
+        joblib.dump(fitted_models[best_model_name], best_model_file)
 
     metadata = {
         "symbol": symbol,
@@ -283,14 +317,17 @@ def train_and_select_model(
             "val": len(X_val),
             "test": len(X_test),
         },
-        "features": FEATURE_COLUMNS,
+        "features": feature_columns,
+        "horizon_sessions": horizon,
+        "target_column": target_col,
         "validation_evaluations": val_evaluations,
         "test_evaluations": test_evaluations,
     }
 
-    meta_file = f"{save_dir}/{slug}_{best_model_name.lower().replace(' ', '_')}_metadata.json"
-    with open(meta_file, "w") as f:
-        json.dump(metadata, f, indent=4)
+    if save_artifacts:
+        meta_file = f"{save_dir}/{slug}_{best_model_name.lower().replace(' ', '_')}{suffix}_metadata.json"
+        with open(meta_file, "w") as f:
+            json.dump(metadata, f, indent=4)
 
     return {
         "symbol": symbol,
@@ -298,16 +335,34 @@ def train_and_select_model(
         "best_model": fitted_models[best_model_name],
         "best_threshold": best_threshold,
         "fitted_models": fitted_models,
+        "expected_return_model": expected_return_model,
+        "feature_columns": feature_columns,
+        "horizon": horizon,
+        "target_col": target_col,
         "val_evaluations": val_evaluations,
         "test_evaluations": test_evaluations,
+        "validation_probabilities": validation_probabilities,
+        "val_partitions": {
+            "X_val": X_val,
+            "y_val": y_val,
+            "dates": dates.iloc[val_idx].reset_index(drop=True),
+            "next_date": df_clean["next_date"].iloc[val_idx].reset_index(drop=True),
+            "next_open": df_clean["next_open"].iloc[val_idx].reset_index(drop=True),
+            "next_close": df_clean["next_close"].iloc[val_idx].reset_index(drop=True),
+            "forward_return": df_clean["forward_return"].iloc[val_idx].reset_index(drop=True),
+            "signal_open": df_clean["open"].iloc[val_idx].reset_index(drop=True),
+            "signal_close": df_clean["close"].iloc[val_idx].reset_index(drop=True),
+        },
         "test_partitions": {
             "X_test": X_test,
             "y_test": y_test,
-            "dates_test": dates.iloc[val_end:],
-            "next_date_test": df_clean["next_date"].iloc[val_end:],
-            "next_open_test": df_clean["next_open"].iloc[val_end:],
-            "next_close_test": df_clean["next_close"].iloc[val_end:],
-            "close_test": df_clean["close"].iloc[val_end:],
+            "dates_test": dates.iloc[test_idx].reset_index(drop=True),
+            "next_date_test": df_clean["next_date"].iloc[test_idx].reset_index(drop=True),
+            "next_open_test": df_clean["next_open"].iloc[test_idx].reset_index(drop=True),
+            "next_close_test": df_clean["next_close"].iloc[test_idx].reset_index(drop=True),
+            "forward_return_test": df_clean["forward_return"].iloc[test_idx].reset_index(drop=True),
+            "signal_open_test": df_clean["open"].iloc[test_idx].reset_index(drop=True),
+            "signal_close_test": df_clean["close"].iloc[test_idx].reset_index(drop=True),
         },
         "metadata_file": meta_file,
         "model_file": best_model_file,

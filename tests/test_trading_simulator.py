@@ -19,6 +19,7 @@ from src.simulator.trading_simulator import (
     OrderExecutionRecord,
     ClosedTradeRecord,
 )
+from src.simulator.strategy import build_strategy_actions, score_validation_configuration
 
 
 def test_transaction_cost_and_slippage_accuracy():
@@ -192,3 +193,63 @@ def test_closed_trade_audit_pnl_math():
     assert pytest.approx(t["net_pnl"], 0.01) == (t["gross_pnl"] - t["total_fees"])
     assert t["is_net_win"] == (t["net_pnl"] > 0)
     assert t["holding_sessions"] == 1
+
+
+def test_hysteresis_holds_between_thresholds_and_enforces_minimum_period():
+    actions, reasons, rejections = build_strategy_actions(
+        probabilities=[0.70, 0.30, 0.30, 0.30, 0.70],
+        signal_opens=[10, 10, 10, 10, 10],
+        signal_closes=[10, 10, 10, 10, 10],
+        minimum_holding_period=3,
+    )
+    np.testing.assert_array_equal(actions, [1, 0, 0, -1, 1])
+    assert reasons[3] == "SELL_SIGNAL"
+    assert rejections == []
+
+
+def test_stop_loss_uses_signal_close_and_max_hold_exits():
+    actions, reasons, _ = build_strategy_actions(
+        probabilities=[0.70, 0.70, 0.70, 0.70],
+        signal_opens=[10, 10, 10, 10],
+        signal_closes=[10, 10, 8.9, 10],
+        minimum_holding_period=3,
+        stop_loss_pct=0.10,
+    )
+    assert actions[0] == 1
+    assert actions[2] == -1
+    assert reasons[2] == "STOP_LOSS"
+
+    actions, reasons, _ = build_strategy_actions(
+        probabilities=[0.70] * 5,
+        signal_opens=[10] * 5,
+        signal_closes=[10] * 5,
+        minimum_holding_period=3,
+        maximum_holding_period=3,
+    )
+    assert actions[3] == -1
+    assert reasons[3] == "MAX_HOLDING_PERIOD"
+
+
+def test_cost_filter_rejects_and_records_unprofitable_entry_estimate():
+    actions, _, rejections = build_strategy_actions(
+        probabilities=[0.80],
+        signal_opens=[10],
+        signal_closes=[10],
+        expected_returns=[0.01],
+        estimated_round_trip_cost=0.012,
+        safety_margin=0.002,
+        cost_filter=True,
+    )
+    assert actions[0] == 0
+    assert rejections[0]["predicted_probability"] == 0.8
+    assert rejections[0]["minimum_required_return"] == pytest.approx(0.014)
+
+
+def test_validation_score_uses_return_drawdown_and_trade_frequency():
+    score = score_validation_configuration({
+        "total_return_pct": 5.0,
+        "max_drawdown_pct": -4.0,
+        "closed_trades": 2,
+    }, signal_count=100)
+    assert score["score"] == pytest.approx(2.8)
+    assert score["closed_trades_per_100_signals"] == 2.0

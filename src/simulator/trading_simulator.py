@@ -25,6 +25,7 @@ class SimulationConfig:
     execution_price: str = "open"  # "open" (next-session open execution) or "close"
     allow_fractional_shares: bool = False
     auto_close_at_end: bool = True  # Liquidate open position on final session close
+    minimum_holding_period: int = 0
 
 
 @dataclass
@@ -41,6 +42,7 @@ class OrderExecutionRecord:
     total_amount: float
     cash_after: float
     reason: str = ""
+    slippage_cost: float = 0.0
 
 
 @dataclass
@@ -65,6 +67,10 @@ class ClosedTradeRecord:
     net_return_pct: float
     is_gross_win: bool
     is_net_win: bool
+    exit_reason: str = "SELL_SIGNAL"
+    entry_slippage: float = 0.0
+    exit_slippage: float = 0.0
+    total_transaction_costs: float = 0.0
 
 
 class TradingSimulator:
@@ -82,12 +88,15 @@ class TradingSimulator:
         exec_prices: pd.Series,
         close_prices: pd.Series,
         signal_dates: Optional[pd.Series] = None,
+        actions: Optional[np.ndarray] = None,
+        exit_reasons: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         """
         Runs the simulation.
         
         Args:
-            signals: Array of binary signals (1 = LONG, 0 = CASH) generated at session t close.
+            signals: Legacy binary signals (1 = LONG, 0 = CASH), generated at session t close.
+            actions: Optional tri-state actions (-1 = SELL, 0 = HOLD, 1 = BUY).
             dates: Series of session t+1 execution dates (or session t dates if signal_dates provided).
             exec_prices: Execution prices for session t+1 (typically Open price).
             close_prices: Close prices for session t+1 (used for mark-to-market valuation).
@@ -96,9 +105,20 @@ class TradingSimulator:
         Returns:
             Dictionary containing performance metrics, equity curves, order logs, and closed trade audit.
         """
-        n = len(signals)
+        if actions is not None:
+            actions = np.asarray(actions, dtype=int)
+            if not np.isin(actions, [-1, 0, 1]).all():
+                raise ValueError("actions must contain only -1 (SELL), 0 (HOLD), or 1 (BUY).")
+            signal_values = actions
+        else:
+            signal_values = np.asarray(signals, dtype=int)
+        n = len(signal_values)
         if n == 0 or len(exec_prices) != n or len(close_prices) != n:
             raise ValueError("Mismatched or empty input series for simulation.")
+        if exit_reasons is not None and len(exit_reasons) != n:
+            raise ValueError("exit_reasons must have the same length as actions.")
+        if self.config.minimum_holding_period < 0:
+            raise ValueError("minimum_holding_period must be non-negative.")
 
         # Determine signal and execution dates cleanly
         if signal_dates is not None and len(signal_dates) == n:
@@ -112,6 +132,7 @@ class TradingSimulator:
         cash = capital
         shares: int = 0
         total_fees = 0.0
+        total_slippage_cost = 0.0
         
         orders: List[OrderExecutionRecord] = []
         closed_trades: List[ClosedTradeRecord] = []
@@ -123,6 +144,7 @@ class TradingSimulator:
         open_trade_shares = 0
         open_entry_price = 0.0
         open_entry_fee = 0.0
+        open_entry_slippage = 0.0
         open_entry_sig_date = None
         open_entry_exec_date = None
         open_entry_idx = 0
@@ -132,7 +154,8 @@ class TradingSimulator:
             exec_dt = exec_dates.iloc[i] if hasattr(exec_dates, "iloc") else exec_dates[i]
             p_exec = float(exec_prices.iloc[i] if hasattr(exec_prices, "iloc") else exec_prices[i])
             p_close = float(close_prices.iloc[i] if hasattr(close_prices, "iloc") else close_prices[i])
-            sig = int(signals[i])
+            sig = int(signal_values[i])
+            exit_reason = exit_reasons[i] if exit_reasons is not None else "SELL_SIGNAL"
 
             # 1. Entry Execution: Signal generated at i (session t close) fills at session t+1 open
             if sig == 1 and shares == 0 and cash > 0:
@@ -147,14 +170,17 @@ class TradingSimulator:
                 if buy_shares > 0:
                     gross_cost = buy_shares * fill_price
                     fee = gross_cost * self.config.fee_rate
+                    slippage_cost = buy_shares * (fill_price - p_exec)
                     total_paid = gross_cost + fee
                     cash -= total_paid
                     shares += int(buy_shares) if not self.config.allow_fractional_shares else buy_shares
                     total_fees += fee
+                    total_slippage_cost += slippage_cost
 
                     open_trade_shares = shares
                     open_entry_price = fill_price
                     open_entry_fee = fee
+                    open_entry_slippage = slippage_cost
                     open_entry_sig_date = sig_dt
                     open_entry_exec_date = exec_dt
                     open_entry_idx = i
@@ -173,17 +199,28 @@ class TradingSimulator:
                             total_amount=round(total_paid, 4),
                             cash_after=round(cash, 4),
                             reason="Long Entry (Signal 1)",
+                            slippage_cost=round(slippage_cost, 4),
                         )
                     )
 
             # 2. Exit Execution: Signal 0 closes existing long position
-            elif sig == 0 and shares > 0:
+            elif shares > 0 and (sig == -1 if actions is not None else sig == 0):
+                holding_sessions = i - open_entry_idx
+                forced_exit = exit_reason in {"STOP_LOSS", "MAX_HOLDING_PERIOD"}
+                if holding_sessions < self.config.minimum_holding_period and not forced_exit:
+                    port_val = cash + (shares * p_close)
+                    portfolio_values.append(port_val)
+                    daily_cash.append(cash)
+                    daily_shares.append(shares)
+                    continue
                 fill_price = p_exec * (1.0 - self.config.slippage_pct)
                 gross_proceeds = shares * fill_price
                 fee = gross_proceeds * self.config.fee_rate
+                slippage_cost = shares * (p_exec - fill_price)
                 net_received = gross_proceeds - fee
                 cash += net_received
                 total_fees += fee
+                total_slippage_cost += slippage_cost
 
                 # Construct ClosedTradeRecord
                 gross_pnl = (fill_price - open_entry_price) * shares
@@ -215,6 +252,10 @@ class TradingSimulator:
                         net_return_pct=round(net_ret_pct, 2),
                         is_gross_win=gross_pnl > 0,
                         is_net_win=net_pnl > 0,
+                        exit_reason=exit_reason,
+                        entry_slippage=round(open_entry_slippage, 3),
+                        exit_slippage=round(slippage_cost, 3),
+                        total_transaction_costs=round(total_trade_fees + open_entry_slippage + slippage_cost, 3),
                     )
                 )
 
@@ -231,7 +272,8 @@ class TradingSimulator:
                         fee=round(fee, 4),
                         total_amount=round(net_received, 4),
                         cash_after=round(cash, 4),
-                        reason="Exit to Cash (Signal 0)",
+                        reason=exit_reason,
+                        slippage_cost=round(slippage_cost, 4),
                     )
                 )
 
@@ -250,9 +292,11 @@ class TradingSimulator:
             fill_price = p_final * (1.0 - self.config.slippage_pct)
             gross_proceeds = shares * fill_price
             fee = gross_proceeds * self.config.fee_rate
+            slippage_cost = shares * (p_final - fill_price)
             net_received = gross_proceeds - fee
             cash += net_received
             total_fees += fee
+            total_slippage_cost += slippage_cost
 
             gross_pnl = (fill_price - open_entry_price) * shares
             total_trade_fees = open_entry_fee + fee
@@ -283,6 +327,10 @@ class TradingSimulator:
                     net_return_pct=round(net_ret_pct, 2),
                     is_gross_win=gross_pnl > 0,
                     is_net_win=net_pnl > 0,
+                    exit_reason="END_OF_TEST",
+                    entry_slippage=round(open_entry_slippage, 3),
+                    exit_slippage=round(slippage_cost, 3),
+                    total_transaction_costs=round(total_trade_fees + open_entry_slippage + slippage_cost, 3),
                 )
             )
             shares = 0
@@ -347,6 +395,8 @@ class TradingSimulator:
             "total_gross_pnl": round(float(total_gross_pnl), 3),
             "total_net_pnl": round(float(total_net_pnl), 3),
             "total_fees_paid": round(float(total_fees), 3),
+            "total_slippage_cost": round(float(total_slippage_cost), 3),
+            "total_transaction_costs": round(float(total_fees + total_slippage_cost), 3),
             "average_holding_sessions": round(float(avg_holding_sessions), 2),
             "fee_rate": self.config.fee_rate,
             "slippage_pct": self.config.slippage_pct,

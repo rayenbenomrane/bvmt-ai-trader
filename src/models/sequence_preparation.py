@@ -111,11 +111,13 @@ def create_sliding_sequences(
 def prepare_sequences_for_stock(
     df_raw: pd.DataFrame,
     symbol: str,
-    sequence_length: int = 15,
+    sequence_length: int = 10,
     train_ratio: float = 0.60,
     val_ratio: float = 0.20,
     target_type: str = "binary",
     scaler_type: str = "standard",
+    horizon: int = 1,
+    market_df: Optional[pd.DataFrame] = None,
 ) -> SequenceDataset:
     """
     Transforms raw OHLCV stock history into clean 3D sequence tensors ready for LSTM/GRU.
@@ -126,19 +128,34 @@ def prepare_sequences_for_stock(
     - Zero data leakage between partitions.
     - Target label y_i represents the market direction for session i+1.
     """
+    if sequence_length not in {10, 20}:
+        raise ValueError("sequence_length must be 10 or 20 trading sessions.")
     if df_raw.empty or len(df_raw) < (sequence_length + 60):
         raise ValueError(f"Insufficient historical data for symbol '{symbol}' (got {len(df_raw)} rows).")
 
     # 1. Feature Engineering and Labeling
-    df_clean = prepare_labeled_dataset(df_raw)
-    target_col = "target_binary" if target_type == "binary" else "target_3class"
+    df_clean = prepare_labeled_dataset(df_raw, horizon=horizon, market_df=market_df)
+    target_columns = {
+        "binary": "target_binary",
+        "cost_aware": "target_cost_aware",
+        "3class": "target_3class",
+        "legacy_1d": "target_legacy_1d",
+    }
+    if target_type not in target_columns:
+        raise ValueError(f"Unsupported target_type: {target_type}")
+    target_col = target_columns[target_type]
+    feature_columns = get_available_feature_columns(df_clean)
 
     total_len = len(df_clean)
     train_end = int(total_len * train_ratio)
     val_end = int(total_len * (train_ratio + val_ratio))
+    train_stop = max(0, train_end - horizon)
+    val_stop = max(train_end, val_end - horizon)
+    if train_stop < sequence_length or val_stop <= train_end or total_len <= val_end:
+        raise ValueError("Insufficient samples after purging horizon-overlapping sequence labels.")
 
-    df_train = df_clean.iloc[:train_end].copy().reset_index(drop=True)
-    df_val = df_clean.iloc[train_end:val_end].copy().reset_index(drop=True)
+    df_train = df_clean.iloc[:train_stop].copy().reset_index(drop=True)
+    df_val = df_clean.iloc[train_end:val_stop].copy().reset_index(drop=True)
     df_test = df_clean.iloc[val_end:].copy().reset_index(drop=True)
 
     # 2. Fit Scaler ONLY on Training Data
@@ -147,21 +164,21 @@ def prepare_sequences_for_stock(
     else:
         scaler = StandardScaler()
 
-    scaler.fit(df_train[FEATURE_COLUMNS].values)
+    scaler.fit(df_train[feature_columns].values)
 
-    # Transform each partition
-    train_scaled = scaler.transform(df_train[FEATURE_COLUMNS].values)
-    val_scaled = scaler.transform(df_val[FEATURE_COLUMNS].values)
-    test_scaled = scaler.transform(df_test[FEATURE_COLUMNS].values)
+    # Apply the training-fitted scaler to the complete chronological matrix.
+    all_scaled = scaler.transform(df_clean[feature_columns].values)
+    train_scaled = all_scaled[:train_stop]
+    val_scaled = all_scaled[train_end:val_stop]
+    test_scaled = all_scaled[val_end:]
 
-    # 3. Create 3D Sequences
-    # To avoid losing (sequence_length - 1) validation and test samples at partition boundaries,
-    # we prepend the trailing context from the previous partition (past data only, strictly leak-free).
-    val_context = np.vstack([train_scaled[-(sequence_length - 1):], val_scaled])
-    val_targets = np.concatenate([df_train[target_col].values[-(sequence_length - 1):], df_val[target_col].values])
-
-    test_context = np.vstack([val_scaled[-(sequence_length - 1):], test_scaled])
-    test_targets = np.concatenate([df_val[target_col].values[-(sequence_length - 1):], df_test[target_col].values])
+    # Prepend earlier scaled observations as context without including future rows.
+    val_context_start = train_end - sequence_length + 1
+    val_context = all_scaled[val_context_start:val_stop]
+    val_targets = df_clean[target_col].iloc[val_context_start:val_stop].values
+    test_context_start = val_end - sequence_length + 1
+    test_context = all_scaled[test_context_start:]
+    test_targets = df_clean[target_col].iloc[test_context_start:].values
 
     X_train, y_train = create_sliding_sequences(train_scaled, df_train[target_col].values, sequence_length)
     X_val, y_val = create_sliding_sequences(val_context, val_targets, sequence_length)
@@ -169,7 +186,7 @@ def prepare_sequences_for_stock(
 
     # Slice date series to align with window outputs
     dates_train = df_train["date"].iloc[sequence_length - 1:].reset_index(drop=True)
-    dates_val = df_val["date"].reset_index(drop=True)
+    dates_val = df_clean["date"].iloc[train_end:val_stop].reset_index(drop=True)
     dates_test = df_test["date"].reset_index(drop=True)
 
     test_exec_prices = df_test["next_open"].reset_index(drop=True)
@@ -184,7 +201,8 @@ def prepare_sequences_for_stock(
         "target_type": target_type,
         "scaler_type": scaler_type,
         "sequence_length": sequence_length,
-        "features": FEATURE_COLUMNS,
+        "features": feature_columns,
+        "horizon_sessions": horizon,
         "total_sessions": total_len,
         "train_samples": len(X_train),
         "val_samples": len(X_val),
@@ -194,7 +212,7 @@ def prepare_sequences_for_stock(
     return SequenceDataset(
         symbol=symbol,
         sequence_length=sequence_length,
-        feature_names=FEATURE_COLUMNS,
+        feature_names=feature_columns,
         X_train=X_train,
         y_train=y_train,
         X_val=X_val,

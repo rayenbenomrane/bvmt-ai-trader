@@ -13,9 +13,11 @@ import pandas as pd
 from datetime import date, timedelta
 from src.models.feature_engineering import (
     FEATURE_COLUMNS,
+    MARKET_FEATURE_COLUMNS,
     build_features,
     prepare_labeled_dataset,
     compute_rsi,
+    round_trip_cost_return,
 )
 
 
@@ -84,7 +86,47 @@ def test_target_alignment():
     df = create_synthetic_ohlcv(80)
     labeled = prepare_labeled_dataset(df)
 
-    # target_binary at row t must match whether close[t+1] > close[t]
-    for i in range(len(labeled) - 1):
-        actual_direction = int(labeled["next_close"].iloc[i] > labeled["close"].iloc[i])
-        assert labeled["target_binary"].iloc[i] == actual_direction
+    # One held session means entry at open t+1 and exit at open t+2.
+    expected_return = labeled["forward_exit_open"] / labeled["next_open"] - 1.0
+    np.testing.assert_array_equal(labeled["target_binary"], (expected_return > 0).astype(int))
+    legacy_return = (labeled["next_close"] - labeled["close"]) / labeled["close"]
+    np.testing.assert_array_equal(labeled["target_legacy_1d"], (legacy_return > 0).astype(int))
+
+
+def test_horizon_uses_trading_rows_and_drops_unavailable_targets():
+    df = create_synthetic_ohlcv(90)
+    feature_rows = build_features(df).dropna(subset=FEATURE_COLUMNS)
+    ordered = df.sort_values("date").reset_index(drop=True)
+    for horizon in (1, 3, 5):
+        labeled = prepare_labeled_dataset(df, horizon=horizon)
+        assert len(labeled) == len(feature_rows) - horizon - 1
+        source_positions = {day: index for index, day in enumerate(ordered["date"])}
+        expected = []
+        for day in labeled["date"]:
+            signal_index = source_positions[day]
+            expected.append(
+                ordered["open"].iloc[signal_index + horizon + 1]
+                / ordered["open"].iloc[signal_index + 1]
+                - 1.0
+            )
+        np.testing.assert_allclose(labeled["forward_return"], expected)
+
+
+def test_round_trip_cost_includes_both_sides_and_compounding():
+    actual = round_trip_cost_return(fee_rate=0.004, slippage_pct=0.001)
+    expected = ((1.001 * 1.004) / (0.999 * 0.996)) - 1.0
+    assert actual == pytest.approx(expected)
+
+
+def test_market_features_align_only_to_current_or_prior_market_date():
+    stock = create_synthetic_ohlcv(100)
+    market = pd.DataFrame({
+        "date": [stock["date"].iloc[60], stock["date"].iloc[70], stock["date"].iloc[80]],
+        "close": [100.0, 110.0, 99.0],
+    })
+    features = build_features(stock, market_df=market)
+
+    for column in MARKET_FEATURE_COLUMNS:
+        assert column in features.columns
+    assert features["tunindex_return_1d"].iloc[70] == pytest.approx(0.1)
+    assert pd.isna(features["tunindex_return_1d"].iloc[69])

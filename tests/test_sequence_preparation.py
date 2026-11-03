@@ -11,7 +11,7 @@ from src.models.sequence_preparation import (
     create_sliding_sequences,
     prepare_sequences_for_stock,
 )
-from src.models.feature_engineering import FEATURE_COLUMNS
+from src.models.feature_engineering import FEATURE_COLUMNS, prepare_labeled_dataset
 
 
 def generate_synthetic_stock_history(n_days: int = 200, seed: int = 42) -> pd.DataFrame:
@@ -96,9 +96,35 @@ def test_prepare_sequences_pipeline():
     assert summary["symbol"] == "TESTSTOCK"
     assert summary["sequence_length"] == seq_len
     assert summary["num_features"] == len(FEATURE_COLUMNS)
+    assert dataset.dates_val.iloc[0] > dataset.dates_train.iloc[-1]
+    assert dataset.dates_test.iloc[0] > dataset.dates_val.iloc[-1]
+
+
+def test_sequence_scaler_uses_training_rows_only():
+    df = generate_synthetic_stock_history(n_days=250)
+    dataset = prepare_sequences_for_stock(
+        df_raw=df,
+        symbol="TESTSTOCK",
+        sequence_length=20,
+        train_ratio=0.6,
+        val_ratio=0.2,
+    )
+    assert dataset.X_train.shape[1] == 20
+    assert dataset.X_val.shape[1] == 20
+    assert dataset.X_test.shape[1] == 20
+    labeled = prepare_labeled_dataset(df)
+    train_stop = int(len(labeled) * 0.6) - 1
+    expected_mean = labeled[FEATURE_COLUMNS].iloc[:train_stop].mean().to_numpy()
+    np.testing.assert_allclose(dataset.scaler.mean_, expected_mean)
+
+
+def test_sequence_length_restriction():
+    df = generate_synthetic_stock_history(n_days=100)
+    with pytest.raises(ValueError, match="sequence_length must be 10 or 20"):
+        prepare_sequences_for_stock(df, symbol="TESTSTOCK", sequence_length=15)
 
 
 def test_insufficient_data_error():
     df_short = generate_synthetic_stock_history(n_days=30)
     with pytest.raises(ValueError, match="Insufficient historical data"):
-        prepare_sequences_for_stock(df_short, symbol="SHORT", sequence_length=15)
+        prepare_sequences_for_stock(df_short, symbol="SHORT", sequence_length=10)
