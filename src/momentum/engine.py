@@ -109,6 +109,8 @@ def compute_momentum_scores(
     lookback_3m: int = TRADING_SESSIONS_3M,
     lookback_6m: int = TRADING_SESSIONS_6M,
     max_price_staleness: int = 5,
+    weight_3m: float = 0.5,
+    weight_6m: float = 0.5,
 ) -> Dict[pd.Timestamp, pd.DataFrame]:
     """For every decision date, compute price-return momentum (3M, 6M),
     percentile ranks and the composite score, restricted to that date's
@@ -163,7 +165,12 @@ def compute_momentum_scores(
         frame = pd.DataFrame(rows).set_index("symbol")
         frame["pct_3m"] = frame["return_3m"].rank(pct=True)
         frame["pct_6m"] = frame["return_6m"].rank(pct=True)
-        frame["momentum_score"] = 0.5 * frame["pct_3m"] + 0.5 * frame["pct_6m"]
+        # weight_3m/weight_6m let the caller isolate a pure 3M or pure 6M
+        # ranking (weight=1.0/0.0) from the combined 50/50 score, while still
+        # requiring both lookbacks to be computable so the eligible universe
+        # is identical across ranking methods -- only the ranking formula
+        # changes, not the data available to it.
+        frame["momentum_score"] = weight_3m * frame["pct_3m"] + weight_6m * frame["pct_6m"]
         out[d] = frame.sort_values("momentum_score", ascending=False)
     return out
 

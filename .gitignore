@@ -5,3 +5,4 @@ venv/
 data/raw/*
 data/processed/*
 .pytest_cache/
+reports/
