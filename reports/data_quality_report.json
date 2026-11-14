@@ -1,0 +1,695 @@
+{
+  "symbols_loaded": 85,
+  "sessions": 1244,
+  "date_range": [
+    "2021-06-17",
+    "2026-10-12"
+  ],
+  "tunindex_rows": 959,
+  "tunindex_date_range": [
+    "2023-01-02",
+    "2026-11-02"
+  ],
+  "per_file_quality_log": [
+    {
+      "file": "AB.csv",
+      "symbol": "AB",
+      "rows": 1106,
+      "first_date": "2021-06-17",
+      "last_date": "2026-10-12",
+      "dropped_rows": 1
+    },
+    {
+      "file": "ADWYA.csv",
+      "symbol": "ADWYA",
+      "rows": 283,
+      "first_date": "2021-06-17",
+      "last_date": "2022-12-30",
+      "dropped_rows": 0
+    },
+    {
+      "file": "AETEC.csv",
+      "symbol": "AETEC",
+      "rows": 352,
+      "first_date": "2021-06-24",
+      "last_date": "2026-07-22",
+      "dropped_rows": 0
+    },
+    {
+      "file": "AL.csv",
+      "symbol": "AL",
+      "rows": 761,
+      "first_date": "2021-06-17",
+      "last_date": "2026-10-12",
+      "dropped_rows": 0
+    },
+    {
+      "file": "ALKIM.csv",
+      "symbol": "ALKIM",
+      "rows": 227,
+      "first_date": "2021-08-03",
+      "last_date": "2026-09-28",
+      "dropped_rows": 0
+    },
+    {
+      "file": "AMS.csv",
+      "symbol": "AMS",
+      "rows": 272,
+      "first_date": "2021-06-21",
+      "last_date": "2023-07-05",
+      "dropped_rows": 0
+    },
+    {
+      "file": "AMV.csv",
+      "symbol": "AMV",
+      "rows": 764,
+      "first_date": "2023-03-09",
+      "last_date": "2026-10-12",
+      "dropped_rows": 0
+    },
+    {
+      "file": "ARTES.csv",
+      "symbol": "ARTES",
+      "rows": 1120,
+      "first_date": "2021-06-17",
+      "last_date": "2026-10-09",
+      "dropped_rows": 0
+    },
+    {
+      "file": "ASSAD.csv",
+      "symbol": "ASSAD",
+      "rows": 1021,
+      "first_date": "2021-06-17",
+      "last_date": "2026-10-12",
+      "dropped_rows": 2
+    },
+    {
+      "file": "ASSMA.csv",
+      "symbol": "ASSMA",
+      "rows": 681,
+      "first_date": "2021-06-17",
+      "last_date": "2026-10-12",
+      "dropped_rows": 0
+    },
+    {
+      "file": "AST.csv",
+      "symbol": "AST",
+      "rows": 334,
+      "first_date": "2021-06-28",
+      "last_date": "2026-10-12",
+      "dropped_rows": 0
+    },
+    {
+      "file": "ATB.csv",
+      "symbol": "ATB",
+      "rows": 1097,
+      "first_date": "2021-06-18",
+      "last_date": "2026-10-12",
+      "dropped_rows": 0
+    },
+    {
+      "file": "ATL.csv",
+      "symbol": "ATL",
+      "rows": 1055,
+      "first_date": "2021-06-17",
+      "last_date": "2026-10-12",
+      "dropped_rows": 2
+    },
+    {
+      "file": "BH.csv",
+      "symbol": "BH",
+      "rows": 1013,
+      "first_date": "2021-06-18",
+      "last_date": "2026-10-12",
+      "dropped_rows": 0
+    },
+    {
+      "file": "BHASS.csv",
+      "symbol": "BHASS",
+      "rows": 113,
+      "first_date": "2021-06-23",
+      "last_date": "2026-09-28",
+      "dropped_rows": 0
+    },
+    {
+      "file": "BHL.csv",
+      "symbol": "BHL",
+      "rows": 733,
+      "first_date": "2021-06-18",
+      "last_date": "2026-10-12",
+      "dropped_rows": 2
+    },
+    {
+      "file": "BIAT.csv",
+      "symbol": "BIAT",
+      "rows": 1142,
+      "first_date": "2021-06-17",
+      "last_date": "2026-10-12",
+      "dropped_rows": 0
+    },
+    {
+      "file": "BL.csv",
+      "symbol": "BL",
+      "rows": 365,
+      "first_date": "2021-06-18",
+      "last_date": "2026-10-12",
+      "dropped_rows": 0
+    },
+    {
+      "file": "BNA.csv",
+      "symbol": "BNA",
+      "rows": 1139,
+      "first_date": "2021-06-17",
+      "last_date": "2026-10-12",
+      "dropped_rows": 2
+    },
+    {
+      "file": "BNASS.csv",
+      "symbol": "BNASS",
+      "rows": 290,
+      "first_date": "2025-08-13",
+      "last_date": "2026-10-12",
+      "dropped_rows": 0
+    },
+    {
+      "file": "BT.csv",
+      "symbol": "BT",
+      "rows": 1136,
+      "first_date": "2021-06-17",
+      "last_date": "2026-10-12",
+      "dropped_rows": 1
+    },
+    {
+      "file": "BTE.csv",
+      "symbol": "BTE",
+      "rows": 729,
+      "first_date": "2021-06-17",
+      "last_date": "2026-10-12",
+      "dropped_rows": 0
+    },
+    {
+      "file": "CC.csv",
+      "symbol": "CC",
+      "rows": 1127,
+      "first_date": "2021-06-17",
+      "last_date": "2026-10-12",
+      "dropped_rows": 7
+    },
+    {
+      "file": "CELL.csv",
+      "symbol": "CELL",
+      "rows": 752,
+      "first_date": "2021-06-17",
+      "last_date": "2026-10-09",
+      "dropped_rows": 3
+    },
+    {
+      "file": "CIL.csv",
+      "symbol": "CIL",
+      "rows": 740,
+      "first_date": "2021-06-18",
+      "last_date": "2026-10-12",
+      "dropped_rows": 0
+    },
+    {
+      "file": "CITY.csv",
+      "symbol": "CITY",
+      "rows": 1119,
+      "first_date": "2021-06-17",
+      "last_date": "2026-10-12",
+      "dropped_rows": 0
+    },
+    {
+      "file": "CREAL.csv",
+      "symbol": "CREAL",
+      "rows": 166,
+      "first_date": "2021-06-17",
+      "last_date": "2023-02-07",
+      "dropped_rows": 1
+    },
+    {
+      "file": "DH.csv",
+      "symbol": "DH",
+      "rows": 1102,
+      "first_date": "2021-06-17",
+      "last_date": "2026-10-12",
+      "dropped_rows": 3
+    },
+    {
+      "file": "ECYCL.csv",
+      "symbol": "ECYCL",
+      "rows": 1138,
+      "first_date": "2021-06-17",
+      "last_date": "2026-10-12",
+      "dropped_rows": 1
+    },
+    {
+      "file": "GIF.csv",
+      "symbol": "GIF",
+      "rows": 387,
+      "first_date": "2021-06-17",
+      "last_date": "2024-10-22",
+      "dropped_rows": 0
+    },
+    {
+      "file": "HL.csv",
+      "symbol": "HL",
+      "rows": 608,
+      "first_date": "2021-06-25",
+      "last_date": "2026-10-05",
+      "dropped_rows": 0
+    },
+    {
+      "file": "ICF.csv",
+      "symbol": "ICF",
+      "rows": 1083,
+      "first_date": "2021-06-17",
+      "last_date": "2026-10-12",
+      "dropped_rows": 0
+    },
+    {
+      "file": "LNDOR.csv",
+      "symbol": "LNDOR",
+      "rows": 1051,
+      "first_date": "2021-06-17",
+      "last_date": "2026-10-12",
+      "dropped_rows": 0
+    },
+    {
+      "file": "LSTR.csv",
+      "symbol": "LSTR",
+      "rows": 210,
+      "first_date": "2021-06-17",
+      "last_date": "2024-07-22",
+      "dropped_rows": 0
+    },
+    {
+      "file": "MAG.csv",
+      "symbol": "MAG",
+      "rows": 512,
+      "first_date": "2021-06-21",
+      "last_date": "2026-10-12",
+      "dropped_rows": 0
+    },
+    {
+      "file": "MGR.csv",
+      "symbol": "MGR",
+      "rows": 1080,
+      "first_date": "2021-06-17",
+      "last_date": "2026-10-12",
+      "dropped_rows": 2
+    },
+    {
+      "file": "MIP.csv",
+      "symbol": "MIP",
+      "rows": 120,
+      "first_date": "2021-07-27",
+      "last_date": "2024-07-29",
+      "dropped_rows": 0
+    },
+    {
+      "file": "MNP.csv",
+      "symbol": "MNP",
+      "rows": 835,
+      "first_date": "2021-06-17",
+      "last_date": "2026-10-12",
+      "dropped_rows": 1
+    },
+    {
+      "file": "MPBS.csv",
+      "symbol": "MPBS",
+      "rows": 1015,
+      "first_date": "2021-06-17",
+      "last_date": "2026-10-12",
+      "dropped_rows": 2
+    },
+    {
+      "file": "NAKL.csv",
+      "symbol": "NAKL",
+      "rows": 987,
+      "first_date": "2021-06-17",
+      "last_date": "2026-10-12",
+      "dropped_rows": 0
+    },
+    {
+      "file": "NBL.csv",
+      "symbol": "NBL",
+      "rows": 988,
+      "first_date": "2021-06-17",
+      "last_date": "2026-10-09",
+      "dropped_rows": 0
+    },
+    {
+      "file": "OTH.csv",
+      "symbol": "OTH",
+      "rows": 1133,
+      "first_date": "2021-06-17",
+      "last_date": "2026-10-12",
+      "dropped_rows": 2
+    },
+    {
+      "file": "PGH.csv",
+      "symbol": "PGH",
+      "rows": 1059,
+      "first_date": "2021-06-17",
+      "last_date": "2026-10-12",
+      "dropped_rows": 1
+    },
+    {
+      "file": "PLAST.csv",
+      "symbol": "PLAST",
+      "rows": 808,
+      "first_date": "2021-06-21",
+      "last_date": "2026-10-12",
+      "dropped_rows": 0
+    },
+    {
+      "file": "PLTU.csv",
+      "symbol": "PLTU",
+      "rows": 50,
+      "first_date": "2021-06-22",
+      "last_date": "2026-10-01",
+      "dropped_rows": 0
+    },
+    {
+      "file": "PX1.csv",
+      "symbol": "PX1",
+      "rows": 1136,
+      "first_date": "2021-06-17",
+      "last_date": "2026-10-12",
+      "dropped_rows": 0
+    },
+    {
+      "file": "SAH.csv",
+      "symbol": "SAH",
+      "rows": 1140,
+      "first_date": "2021-06-17",
+      "last_date": "2026-10-12",
+      "dropped_rows": 2
+    },
+    {
+      "file": "SAM.csv",
+      "symbol": "SAM",
+      "rows": 1118,
+      "first_date": "2021-06-17",
+      "last_date": "2026-10-12",
+      "dropped_rows": 0
+    },
+    {
+      "file": "SCB.csv",
+      "symbol": "SCB",
+      "rows": 721,
+      "first_date": "2021-06-17",
+      "last_date": "2026-10-12",
+      "dropped_rows": 1
+    },
+    {
+      "file": "SERVI.csv",
+      "symbol": "SERVI",
+      "rows": 314,
+      "first_date": "2021-06-17",
+      "last_date": "2024-01-08",
+      "dropped_rows": 1
+    },
+    {
+      "file": "SFBT.csv",
+      "symbol": "SFBT",
+      "rows": 1141,
+      "first_date": "2021-06-17",
+      "last_date": "2026-10-12",
+      "dropped_rows": 0
+    },
+    {
+      "file": "SIAME.csv",
+      "symbol": "SIAME",
+      "rows": 1085,
+      "first_date": "2021-06-17",
+      "last_date": "2026-10-12",
+      "dropped_rows": 0
+    },
+    {
+      "file": "SIMPA.csv",
+      "symbol": "SIMPA",
+      "rows": 140,
+      "first_date": "2021-06-17",
+      "last_date": "2026-07-31",
+      "dropped_rows": 0
+    },
+    {
+      "file": "SIPHA.csv",
+      "symbol": "SIPHA",
+      "rows": 345,
+      "first_date": "2021-06-18",
+      "last_date": "2026-10-05",
+      "dropped_rows": 0
+    },
+    {
+      "file": "SITS.csv",
+      "symbol": "SITS",
+      "rows": 286,
+      "first_date": "2021-07-06",
+      "last_date": "2026-09-30",
+      "dropped_rows": 1
+    },
+    {
+      "file": "SMART.csv",
+      "symbol": "SMART",
+      "rows": 943,
+      "first_date": "2022-03-18",
+      "last_date": "2026-10-12",
+      "dropped_rows": 4
+    },
+    {
+      "file": "SMD.csv",
+      "symbol": "SMD",
+      "rows": 272,
+      "first_date": "2021-06-17",
+      "last_date": "2026-10-12",
+      "dropped_rows": 0
+    },
+    {
+      "file": "SOKNA.csv",
+      "symbol": "SOKNA",
+      "rows": 822,
+      "first_date": "2021-07-01",
+      "last_date": "2026-10-12",
+      "dropped_rows": 1
+    },
+    {
+      "file": "SOMOC.csv",
+      "symbol": "SOMOC",
+      "rows": 1064,
+      "first_date": "2021-06-17",
+      "last_date": "2026-10-12",
+      "dropped_rows": 0
+    },
+    {
+      "file": "SOPAT.csv",
+      "symbol": "SOPAT",
+      "rows": 340,
+      "first_date": "2021-06-18",
+      "last_date": "2023-10-31",
+      "dropped_rows": 0
+    },
+    {
+      "file": "SOTEM.csv",
+      "symbol": "SOTEM",
+      "rows": 110,
+      "first_date": "2021-07-02",
+      "last_date": "2026-01-02",
+      "dropped_rows": 0
+    },
+    {
+      "file": "SOTET.csv",
+      "symbol": "SOTET",
+      "rows": 1119,
+      "first_date": "2021-06-17",
+      "last_date": "2026-10-12",
+      "dropped_rows": 2
+    },
+    {
+      "file": "SOTUV.csv",
+      "symbol": "SOTUV",
+      "rows": 1125,
+      "first_date": "2021-06-17",
+      "last_date": "2026-10-12",
+      "dropped_rows": 0
+    },
+    {
+      "file": "SPDIT.csv",
+      "symbol": "SPDIT",
+      "rows": 888,
+      "first_date": "2021-06-17",
+      "last_date": "2026-10-12",
+      "dropped_rows": 0
+    },
+    {
+      "file": "STA.csv",
+      "symbol": "STA",
+      "rows": 898,
+      "first_date": "2022-03-14",
+      "last_date": "2026-10-12",
+      "dropped_rows": 0
+    },
+    {
+      "file": "STAR.csv",
+      "symbol": "STAR",
+      "rows": 727,
+      "first_date": "2021-06-22",
+      "last_date": "2026-10-12",
+      "dropped_rows": 2
+    },
+    {
+      "file": "STB.csv",
+      "symbol": "STB",
+      "rows": 1128,
+      "first_date": "2021-06-17",
+      "last_date": "2026-10-12",
+      "dropped_rows": 2
+    },
+    {
+      "file": "STIP.csv",
+      "symbol": "STIP",
+      "rows": 538,
+      "first_date": "2021-06-18",
+      "last_date": "2026-10-12",
+      "dropped_rows": 0
+    },
+    {
+      "file": "STPAP.csv",
+      "symbol": "STPAP",
+      "rows": 1113,
+      "first_date": "2021-06-17",
+      "last_date": "2026-10-12",
+      "dropped_rows": 0
+    },
+    {
+      "file": "STPIL.csv",
+      "symbol": "STPIL",
+      "rows": 1036,
+      "first_date": "2021-06-17",
+      "last_date": "2026-10-12",
+      "dropped_rows": 1
+    },
+    {
+      "file": "TAIR.csv",
+      "symbol": "TAIR",
+      "rows": 1044,
+      "first_date": "2021-06-17",
+      "last_date": "2026-10-12",
+      "dropped_rows": 0
+    },
+    {
+      "file": "TBIDX.csv",
+      "symbol": "TBIDX",
+      "rows": 1184,
+      "first_date": "2021-06-17",
+      "last_date": "2026-09-25",
+      "dropped_rows": 0
+    },
+    {
+      "file": "TGH.csv",
+      "symbol": "TGH",
+      "rows": 995,
+      "first_date": "2021-06-17",
+      "last_date": "2026-10-12",
+      "dropped_rows": 0
+    },
+    {
+      "file": "TINV.csv",
+      "symbol": "TINV",
+      "rows": 432,
+      "first_date": "2021-06-17",
+      "last_date": "2026-10-12",
+      "dropped_rows": 1
+    },
+    {
+      "file": "TJARI.csv",
+      "symbol": "TJARI",
+      "rows": 1138,
+      "first_date": "2021-06-17",
+      "last_date": "2026-10-12",
+      "dropped_rows": 1
+    },
+    {
+      "file": "TJL.csv",
+      "symbol": "TJL",
+      "rows": 866,
+      "first_date": "2021-06-29",
+      "last_date": "2026-10-08",
+      "dropped_rows": 1
+    },
+    {
+      "file": "TLNET.csv",
+      "symbol": "TLNET",
+      "rows": 1129,
+      "first_date": "2021-06-17",
+      "last_date": "2026-10-12",
+      "dropped_rows": 0
+    },
+    {
+      "file": "TLS.csv",
+      "symbol": "TLS",
+      "rows": 854,
+      "first_date": "2021-06-17",
+      "last_date": "2026-10-12",
+      "dropped_rows": 1
+    },
+    {
+      "file": "TPR.csv",
+      "symbol": "TPR",
+      "rows": 1113,
+      "first_date": "2021-06-18",
+      "last_date": "2026-10-12",
+      "dropped_rows": 1
+    },
+    {
+      "file": "TRE.csv",
+      "symbol": "TRE",
+      "rows": 862,
+      "first_date": "2021-06-18",
+      "last_date": "2026-10-12",
+      "dropped_rows": 2
+    },
+    {
+      "file": "UADH.csv",
+      "symbol": "UADH",
+      "rows": 619,
+      "first_date": "2021-06-17",
+      "last_date": "2026-07-22",
+      "dropped_rows": 0
+    },
+    {
+      "file": "UBCI.csv",
+      "symbol": "UBCI",
+      "rows": 520,
+      "first_date": "2021-06-17",
+      "last_date": "2026-10-12",
+      "dropped_rows": 0
+    },
+    {
+      "file": "UIB.csv",
+      "symbol": "UIB",
+      "rows": 1068,
+      "first_date": "2021-06-17",
+      "last_date": "2026-10-12",
+      "dropped_rows": 1
+    },
+    {
+      "file": "UMED.csv",
+      "symbol": "UMED",
+      "rows": 1125,
+      "first_date": "2021-06-17",
+      "last_date": "2026-10-12",
+      "dropped_rows": 1
+    },
+    {
+      "file": "WIFAK.csv",
+      "symbol": "WIFAK",
+      "rows": 675,
+      "first_date": "2021-06-25",
+      "last_date": "2026-10-12",
+      "dropped_rows": 0
+    }
+  ]
+}

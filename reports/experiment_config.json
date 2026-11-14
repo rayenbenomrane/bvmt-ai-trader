@@ -1,0 +1,25 @@
+{
+  "git_commit_hash": "a83cc1cfdf00069e3d565c75de92daece13f0bd2",
+  "timestamp_utc": "2026-11-14T20:27:23.895195+00:00",
+  "initial_capital": 10000.0,
+  "execution": "next_session_open",
+  "cost_model": "competition mode: no commission, no slippage",
+  "rebalance_schedule": "monthly (last trading session of each calendar month)",
+  "momentum_formation": "3M (63 sessions) and 6M (126 sessions) PRICE return (not total return -- dividend/corporate-action data unavailable in the raw CSV source for this first task; this is the price-return sensitivity test the roadmap calls for when dividend data is incomplete)",
+  "liquidity_filters": {
+    "max_zero_volume_ratio_60d": 0.3,
+    "min_avg_traded_value_60d_tnd": 100000.0,
+    "min_history_sessions": 126
+  },
+  "variants": [
+    "momentum_top20",
+    "momentum_top20_regime",
+    "momentum_top30",
+    "momentum_top30_regime"
+  ],
+  "decision_dates_count": 56,
+  "decision_date_range": [
+    "2021-12-13",
+    "2026-10-12"
+  ]
+}

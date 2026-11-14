@@ -1,0 +1,7 @@
+label,total_return_pct,cagr_pct,annualized_volatility_pct,sharpe_ratio,sortino_ratio,max_drawdown_pct,calmar_ratio,worst_month_pct,avg_turnover_per_rebalance_pct
+momentum_top20,129.672,16.918,9.952,1.744,1.959,-15.841,1.068,-8.51,42.318
+momentum_top20_regime,94.745,13.348,9.03,1.542,1.49,-15.842,0.843,-8.505,27.205
+momentum_top30,111.825,15.154,8.599,1.813,2.041,-16.501,0.918,-7.579,36.435
+momentum_top30_regime,91.778,13.022,7.717,1.75,1.747,-16.553,0.787,-7.599,21.666
+equal_weight_buy_and_hold,42.165,6.837,7.953,0.937,1.171,-16.46,0.415,-5.207,
+cash,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,

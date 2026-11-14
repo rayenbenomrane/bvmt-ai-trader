@@ -1,0 +1,1742 @@
+diff --git a/.gitignore b/.gitignore
+index 812c92f..02d78a8 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -5,3 +5,4 @@ venv/
+ data/raw/*
+ data/processed/*
+ .pytest_cache/
++reports/
+diff --git a/scripts/run_momentum_benchmark.py b/scripts/run_momentum_benchmark.py
+new file mode 100644
+index 0000000..921463f
+--- /dev/null
++++ b/scripts/run_momentum_benchmark.py
+@@ -0,0 +1,342 @@
++"""
++First implementation task (roadmap Section 19): a standalone cross-sectional
++3M/6M momentum benchmark, long-only, equal-weight, monthly rebalance,
++next-session-open execution, top-20% vs top-30%, with and without the
++TUNINDEX SMA(200) regime filter -- compared against cash and an
++equal-weight buy-and-hold of the same eligible universe.
++
++Run with:
++    python -m scripts.run_momentum_benchmark
++(run from the repository root)
++
++This is a no-fee "competition" cost mode, matching the existing project's
++competition convention (README: "no broker commission or slippage").
++Realistic costs (Section 11.3) are Phase 4 work, not part of this first
++task.
++"""
++
++from __future__ import annotations
++
++import json
++import subprocess
++from datetime import datetime, timezone
++from pathlib import Path
++from typing import Dict, List
++
++import pandas as pd
++
++import sys
++
++ROOT = Path(__file__).resolve().parents[1]
++sys.path.insert(0, str(ROOT))
++
++from src.momentum.data_loader import (  # noqa: E402
++    build_close_panel,
++    build_open_panel,
++    build_trading_calendar,
++    build_volume_panel,
++    load_price_panel,
++    load_tunindex,
++)
++from src.momentum.engine import (  # noqa: E402
++    TRADING_SESSIONS_6M,
++    PortfolioBacktestConfig,
++    compute_momentum_scores,
++    compute_point_in_time_universe,
++    compute_regime_series,
++    run_portfolio_backtest,
++)
++from src.momentum.performance import compute_metrics, yearly_returns  # noqa: E402
++
++REPORTS_DIR = ROOT / "reports"
++
++
++def _git_commit_hash() -> str:
++    try:
++        return (
++            subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT)
++            .decode()
++            .strip()
++        )
++    except Exception:
++        return "unknown"
++
++
++def month_end_decision_dates(calendar: pd.DatetimeIndex, min_history: int) -> List[pd.Timestamp]:
++    """Last trading session of each calendar month, once enough history
++    exists for the 6-month momentum feature."""
++    s = pd.Series(range(len(calendar)), index=calendar)
++    month_ends = s.groupby([calendar.year, calendar.month]).apply(lambda x: x.index[-1])
++    dates = sorted(month_ends.tolist())
++    return [d for d in dates if calendar.get_loc(d) >= min_history]
++
++
++def equal_weight_buy_and_hold(
++    open_panel: pd.DataFrame,
++    close_panel: pd.DataFrame,
++    eligible_symbols: List[str],
++    start_date: pd.Timestamp,
++    initial_capital: float,
++) -> pd.Series:
++    """Benchmark 3 (roadmap Section 14): equal-weight buy-and-hold of the
++    universe eligible at the first decision date, bought once at the first
++    execution open, held to the end with no rebalancing."""
++    calendar = close_panel.index
++    valuation_close = close_panel.ffill()
++    opens = open_panel.loc[start_date]
++    per_name = initial_capital / len(eligible_symbols)
++    shares = {}
++    cash = initial_capital
++    for sym in eligible_symbols:
++        px = opens.get(sym)
++        if pd.isna(px) or px is None or px <= 0:
++            continue
++        qty = int(per_name // px)
++        if qty > 0:
++            shares[sym] = qty
++            cash -= qty * px
++    equity = []
++    for d in calendar:
++        if d < start_date:
++            equity.append(initial_capital)
++            continue
++        val = cash
++        px_row = valuation_close.loc[d]
++        for sym, qty in shares.items():
++            p = px_row.get(sym)
++            if pd.notna(p):
++                val += qty * p
++        equity.append(val)
++    return pd.Series(equity, index=calendar, name="equal_weight_buy_and_hold")
++
++
++def main() -> None:
++    REPORTS_DIR.mkdir(parents=True, exist_ok=True)
++    print("Loading raw BVMT price panel ...")
++    panel = load_price_panel()
++    quality_log = panel.attrs.get("quality_log", [])
++
++    close_panel = build_close_panel(panel)
++    open_panel = build_open_panel(panel)
++    volume_panel = build_volume_panel(panel)
++    calendar = build_trading_calendar(panel)
++    close_panel = close_panel.reindex(calendar)
++    open_panel = open_panel.reindex(calendar)
++    volume_panel = volume_panel.reindex(calendar)
++
++    tunindex = load_tunindex()
++    regime_series = compute_regime_series(tunindex, sma_window=200)
++
++    print(f"Universe: {close_panel.shape[1]} symbols, "
++          f"{len(calendar)} sessions "
++          f"({calendar.min().date()} -> {calendar.max().date()})")
++
++    decision_dates = month_end_decision_dates(calendar, min_history=TRADING_SESSIONS_6M)
++    print(f"Decision dates (monthly, after 6M history warm-up): {len(decision_dates)} "
++          f"({decision_dates[0].date()} -> {decision_dates[-1].date()})")
++
++    print("Computing point-in-time universe & liquidity filters ...")
++    universe = compute_point_in_time_universe(close_panel, volume_panel, decision_dates)
++
++    print("Computing 3M/6M momentum & composite ranks ...")
++    momentum_by_date = compute_momentum_scores(close_panel, universe)
++
++    initial_capital = 10_000.0
++    results: Dict[str, Dict] = {}
++    variants = [
++        ("momentum_top20", 0.20, False),
++        ("momentum_top20_regime", 0.20, True),
++        ("momentum_top30", 0.30, False),
++        ("momentum_top30_regime", 0.30, True),
++    ]
++    for name, top_fraction, use_regime in variants:
++        print(f"Backtesting variant: {name} ...")
++        cfg = PortfolioBacktestConfig(
++            initial_capital=initial_capital,
++            top_fraction=top_fraction,
++            use_regime_filter=use_regime,
++        )
++        results[name] = run_portfolio_backtest(
++            close_panel,
++            open_panel,
++            universe,
++            momentum_by_date,
++            decision_dates,
++            regime_series if use_regime else None,
++            cfg,
++        )
++
++    # Use the first decision date that actually has an eligible universe as
++    # the buy-and-hold benchmark's inception point (some of the earliest
++    # monthly decision dates have zero eligible names while history/liquidity
++    # windows are still warming up).
++    first_decision = next(
++        d for d in decision_dates
++        if any(info["eligible"] for info in universe[d].values())
++    )
++    first_exec_rb = next(
++        rb for rb in results["momentum_top20"]["rebalances"]
++        if rb.decision_date == first_decision
++    )
++    first_exec = first_exec_rb.execution_date
++    eligible_at_start = [
++        s for s, info in universe[first_decision].items() if info["eligible"]
++    ]
++    bh_equity = equal_weight_buy_and_hold(
++        open_panel, close_panel, eligible_at_start, first_exec, initial_capital
++    )
++    cash_equity = pd.Series(initial_capital, index=calendar, name="cash")
++
++    # ---------------- reports ----------------
++    print("Writing reports ...")
++
++    # 1. data quality
++    with (REPORTS_DIR / "data_quality_report.json").open("w") as f:
++        json.dump(
++            {
++                "symbols_loaded": int(close_panel.shape[1]),
++                "sessions": int(len(calendar)),
++                "date_range": [str(calendar.min().date()), str(calendar.max().date())],
++                "tunindex_rows": int(len(tunindex)),
++                "tunindex_date_range": [
++                    str(tunindex["date"].min().date()),
++                    str(tunindex["date"].max().date()),
++                ],
++                "per_file_quality_log": quality_log,
++            },
++            f,
++            indent=2,
++            default=str,
++        )
++
++    # 2. universe snapshot (long format, every decision date x symbol)
++    uni_rows = []
++    for d, syms in universe.items():
++        for sym, info in syms.items():
++            uni_rows.append({"decision_date": d, "symbol": sym, **info})
++    pd.DataFrame(uni_rows).to_csv(REPORTS_DIR / "universe_snapshot.csv", index=False)
++
++    # 3. ranked candidates (momentum scores, all decision dates)
++    rank_rows = []
++    for d, frame in momentum_by_date.items():
++        if frame.empty:
++            continue
++        f2 = frame.reset_index()
++        f2.insert(0, "decision_date", d)
++        rank_rows.append(f2)
++    if rank_rows:
++        pd.concat(rank_rows, ignore_index=True).to_csv(
++            REPORTS_DIR / "ranked_candidates.csv", index=False
++        )
++
++    # 4. target portfolios / rebalance log, one file across all variants
++    tp_rows = []
++    for name, res in results.items():
++        for rb in res["rebalances"]:
++            tp_rows.append(
++                {
++                    "strategy": name,
++                    "decision_date": rb.decision_date,
++                    "execution_date": rb.execution_date,
++                    "regime": rb.regime,
++                    "n_eligible": rb.n_eligible,
++                    "n_selected": rb.n_selected,
++                    "selected": ",".join(rb.selected),
++                    "turnover_pct": round(rb.turnover * 100.0, 3),
++                }
++            )
++    pd.DataFrame(tp_rows).to_csv(REPORTS_DIR / "target_portfolio.csv", index=False)
++
++    # 5. daily portfolio equity, all variants + benchmarks
++    equity_frame = pd.DataFrame(
++        {name: res["equity_curve"] for name, res in results.items()}
++    )
++    equity_frame["cash"] = cash_equity
++    equity_frame["equal_weight_buy_and_hold"] = bh_equity
++    equity_frame.index.name = "date"
++    equity_frame.to_csv(REPORTS_DIR / "daily_portfolio_equity.csv")
++
++    # 6. strategy comparison (metrics summary)
++    comparison_rows = []
++    for name, res in results.items():
++        comparison_rows.append(compute_metrics(res["equity_curve"], label=name))
++    comparison_rows.append(compute_metrics(bh_equity, label="equal_weight_buy_and_hold"))
++    comparison_rows.append(
++        {
++            "label": "cash",
++            "total_return_pct": 0.0,
++            "cagr_pct": 0.0,
++            "annualized_volatility_pct": 0.0,
++            "sharpe_ratio": 0.0,
++            "sortino_ratio": 0.0,
++            "max_drawdown_pct": 0.0,
++            "calmar_ratio": 0.0,
++            "worst_month_pct": 0.0,
++        }
++    )
++    comparison_df = pd.DataFrame(comparison_rows)
++    # turnover summary per variant
++    turnover_avg = {
++        name: round(
++            100.0 * sum(rb.turnover for rb in res["rebalances"]) / max(1, len(res["rebalances"])),
++            3,
++        )
++        for name, res in results.items()
++    }
++    comparison_df["avg_turnover_per_rebalance_pct"] = comparison_df["label"].map(turnover_avg)
++    comparison_df.to_csv(REPORTS_DIR / "strategy_comparison.csv", index=False)
++
++    # 7. yearly returns per variant + benchmark
++    yr_rows = []
++    for name, res in results.items():
++        yr = yearly_returns(res["equity_curve"])
++        yr.insert(0, "strategy", name)
++        yr_rows.append(yr)
++    yr_bh = yearly_returns(bh_equity)
++    yr_bh.insert(0, "strategy", "equal_weight_buy_and_hold")
++    yr_rows.append(yr_bh)
++    pd.concat(yr_rows, ignore_index=True).to_csv(REPORTS_DIR / "yearly_returns.csv", index=False)
++
++    # 8. experiment config
++    with (REPORTS_DIR / "experiment_config.json").open("w") as f:
++        json.dump(
++            {
++                "git_commit_hash": _git_commit_hash(),
++                "timestamp_utc": datetime.now(timezone.utc).isoformat(),
++                "initial_capital": initial_capital,
++                "execution": "next_session_open",
++                "cost_model": "competition mode: no commission, no slippage",
++                "rebalance_schedule": "monthly (last trading session of each calendar month)",
++                "momentum_formation": "3M (63 sessions) and 6M (126 sessions) PRICE return "
++                "(not total return -- dividend/corporate-action data unavailable in the "
++                "raw CSV source for this first task; this is the price-return sensitivity "
++                "test the roadmap calls for when dividend data is incomplete)",
++                "liquidity_filters": {
++                    "max_zero_volume_ratio_60d": 0.30,
++                    "min_avg_traded_value_60d_tnd": 100_000.0,
++                    "min_history_sessions": TRADING_SESSIONS_6M,
++                },
++                "variants": [v[0] for v in variants],
++                "decision_dates_count": len(decision_dates),
++                "decision_date_range": [str(decision_dates[0].date()), str(decision_dates[-1].date())],
++            },
++            f,
++            indent=2,
++            default=str,
++        )
++
++    # ---------------- console summary ----------------
++    print("\n" + "=" * 72)
++    print(" STRATEGY COMPARISON (no-fee competition mode)")
++    print("=" * 72)
++    print(
++        comparison_df[
++            ["label", "total_return_pct", "cagr_pct", "max_drawdown_pct", "sharpe_ratio",
++             "avg_turnover_per_rebalance_pct"]
++        ].to_string(index=False)
++    )
++    print(f"\nReports written to: {REPORTS_DIR}")
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/scripts/run_momentum_robustness.py b/scripts/run_momentum_robustness.py
+new file mode 100644
+index 0000000..408037a
+--- /dev/null
++++ b/scripts/run_momentum_robustness.py
+@@ -0,0 +1,424 @@
++"""
++Robustness analysis for the BVMT cross-sectional momentum strategy.
++
++Extends scripts/run_momentum_benchmark.py (left unmodified, along with its
++reports/ outputs) with:
++  1. Monthly vs quarterly rebalancing
++  2. Top 20% vs top 30% portfolios
++  3. 3M-only vs 6M-only vs combined momentum ranking
++  4. Yearly performance breakdowns, 2021-2026
++  5. Rolling chronological walk-forward folds (12-month window, 6-month step)
++  6. TUNINDEX SMA(200) regime-filter attribution
++  7. Risk metrics: Sortino, worst month, annualized volatility, exposure,
++     concentration (Herfindahl index, holding count)
++  8. Sensitivity to portfolio size (top_fraction) and max position weight
++
++No commission, slippage or market-impact term is introduced anywhere in this
++script -- every variant below is evaluated under the same no-fee competition
++assumption as scripts/run_momentum_benchmark.py. The "most robust" strategy
++is selected using only non-holdout walk-forward folds (see
++src/momentum/robustness.py:select never peeks at the final fold); the final
++fold's performance is reported afterwards for confirmation only.
++
++Run with:
++    python3 scripts/run_momentum_robustness.py
++(from the repository root; depends on scripts/run_momentum_benchmark.py
++having been runnable, i.e. the same raw CSV panel under
++src/data_collection/raw/.)
++"""
++
++from __future__ import annotations
++
++import json
++import sys
++from datetime import datetime, timezone
++from itertools import product
++from pathlib import Path
++from typing import Dict, List
++
++import numpy as np
++import pandas as pd
++
++ROOT = Path(__file__).resolve().parents[1]
++sys.path.insert(0, str(ROOT))
++
++from src.momentum.data_loader import (  # noqa: E402
++    build_close_panel,
++    build_open_panel,
++    build_trading_calendar,
++    build_volume_panel,
++    load_price_panel,
++    load_tunindex,
++)
++from src.momentum.engine import (  # noqa: E402
++    TRADING_SESSIONS_6M,
++    PortfolioBacktestConfig,
++    compute_momentum_scores,
++    compute_point_in_time_universe,
++    compute_regime_series,
++    run_portfolio_backtest,
++)
++from src.momentum.performance import compute_metrics, yearly_returns  # noqa: E402
++from src.momentum.robustness import (  # noqa: E402
++    build_rolling_folds,
++    concentration_and_exposure_metrics,
++    fold_metrics,
++    quarter_end_decision_dates,
++    regime_attribution,
++    robustness_score,
++    summarize_folds,
++)
++from scripts.run_momentum_benchmark import (  # noqa: E402
++    _git_commit_hash,
++    equal_weight_buy_and_hold,
++    month_end_decision_dates,
++)
++
++OUT_DIR = ROOT / "reports" / "robustness"
++
++RANKING_WEIGHTS = {
++    "3m_only": (1.0, 0.0),
++    "6m_only": (0.0, 1.0),
++    "combined_3m_6m": (0.5, 0.5),
++}
++
++
++def build_variant_name(rebalance: str, top_fraction: float, ranking: str, regime: bool) -> str:
++    return f"{rebalance}_top{int(top_fraction * 100)}_{ranking}{'_regime' if regime else ''}"
++
++
++def main() -> None:
++    OUT_DIR.mkdir(parents=True, exist_ok=True)
++    print("Loading raw BVMT price panel ...")
++    panel = load_price_panel()
++    close_panel = build_close_panel(panel)
++    open_panel = build_open_panel(panel)
++    volume_panel = build_volume_panel(panel)
++    calendar = build_trading_calendar(panel)
++    close_panel = close_panel.reindex(calendar)
++    open_panel = open_panel.reindex(calendar)
++    volume_panel = volume_panel.reindex(calendar)
++
++    tunindex = load_tunindex()
++    regime_series = compute_regime_series(tunindex, sma_window=200)
++
++    monthly_dates = month_end_decision_dates(calendar, min_history=TRADING_SESSIONS_6M)
++    quarterly_dates = quarter_end_decision_dates(calendar, min_history=TRADING_SESSIONS_6M)
++    print(f"Monthly decision dates:   {len(monthly_dates)}")
++    print(f"Quarterly decision dates: {len(quarterly_dates)}")
++
++    # Universe is a function of (calendar position, liquidity history), not
++    # of rebalance frequency, so it's computed once per decision-date set
++    # and reused across every ranking-method / top-fraction / regime
++    # combination evaluated on that schedule (avoids exhaustive recompute,
++    # per the "don't perform exhaustive unrelated testing" constraint).
++    universe_by_schedule = {
++        "monthly": compute_point_in_time_universe(close_panel, volume_panel, monthly_dates),
++        "quarterly": compute_point_in_time_universe(close_panel, volume_panel, quarterly_dates),
++    }
++    decision_dates_by_schedule = {"monthly": monthly_dates, "quarterly": quarterly_dates}
++
++    momentum_cache: Dict[tuple, Dict] = {}
++
++    def get_momentum(schedule: str, ranking: str) -> Dict:
++        key = (schedule, ranking)
++        if key not in momentum_cache:
++            w3, w6 = RANKING_WEIGHTS[ranking]
++            momentum_cache[key] = compute_momentum_scores(
++                close_panel,
++                universe_by_schedule[schedule],
++                weight_3m=w3,
++                weight_6m=w6,
++            )
++        return momentum_cache[key]
++
++    # ------------------------------------------------------------------
++    # Core grid: Tasks 1-3 -- rebalance frequency x top_fraction x ranking
++    # method, regime filter OFF (regime impact is isolated separately in
++    # Task 6 so its effect isn't tangled up with the other three axes).
++    # ------------------------------------------------------------------
++    print("Running core grid (rebalance x top_fraction x ranking) ...")
++    core_variants: Dict[str, Dict] = {}
++    core_grid_rows = []
++    for schedule, top_fraction, ranking in product(
++        ("monthly", "quarterly"), (0.20, 0.30), RANKING_WEIGHTS.keys()
++    ):
++        name = build_variant_name(schedule, top_fraction, ranking, regime=False)
++        momentum_by_date = get_momentum(schedule, ranking)
++        cfg = PortfolioBacktestConfig(top_fraction=top_fraction, use_regime_filter=False)
++        res = run_portfolio_backtest(
++            close_panel,
++            open_panel,
++            universe_by_schedule[schedule],
++            momentum_by_date,
++            decision_dates_by_schedule[schedule],
++            None,
++            cfg,
++        )
++        core_variants[name] = res
++
++    # Regime on/off, for the headline monthly/combined/top20/top30 pair
++    # (Task 6) -- same engine, same schedule, only the regime flag differs.
++    print("Running regime on/off comparison (monthly, combined ranking) ...")
++    regime_variants: Dict[str, Dict] = {}
++    for top_fraction, use_regime in product((0.20, 0.30), (False, True)):
++        name = build_variant_name("monthly", top_fraction, "combined_3m_6m", use_regime)
++        if name in core_variants:
++            regime_variants[name] = core_variants[name]
++            continue
++        momentum_by_date = get_momentum("monthly", "combined_3m_6m")
++        cfg = PortfolioBacktestConfig(top_fraction=top_fraction, use_regime_filter=use_regime)
++        regime_variants[name] = run_portfolio_backtest(
++            close_panel,
++            open_panel,
++            universe_by_schedule["monthly"],
++            momentum_by_date,
++            monthly_dates,
++            regime_series if use_regime else None,
++            cfg,
++        )
++
++    all_variants: Dict[str, Dict] = {**core_variants, **regime_variants}
++
++    # ------------------------------------------------------------------
++    # Benchmark: equal-weight buy-and-hold, anchored to the monthly
++    # schedule's first eligible universe (same benchmark convention as
++    # scripts/run_momentum_benchmark.py, reused rather than redefined).
++    # ------------------------------------------------------------------
++    first_decision = next(
++        d for d in monthly_dates
++        if any(info["eligible"] for info in universe_by_schedule["monthly"][d].values())
++    )
++    first_exec = next(
++        rb.execution_date
++        for rb in next(iter(core_variants.values()))["rebalances"]
++        if rb.decision_date == first_decision
++    )
++    eligible_at_start = [
++        s for s, info in universe_by_schedule["monthly"][first_decision].items() if info["eligible"]
++    ]
++    bh_equity = equal_weight_buy_and_hold(
++        open_panel, close_panel, eligible_at_start, first_exec, 10_000.0
++    )
++
++    # ------------------------------------------------------------------
++    # Task 8: sensitivity to portfolio size (top_fraction) and max
++    # position weight. Held fixed: monthly rebalance, combined ranking,
++    # no regime filter -- isolates each axis rather than a full
++    # cross-product sweep.
++    # ------------------------------------------------------------------
++    print("Running portfolio-size / weight-cap sensitivity sweeps ...")
++    combined_monthly_momentum = get_momentum("monthly", "combined_3m_6m")
++    size_sensitivity_rows = []
++    for top_fraction in (0.10, 0.15, 0.20, 0.25, 0.30, 0.40):
++        cfg = PortfolioBacktestConfig(top_fraction=top_fraction, use_regime_filter=False)
++        res = run_portfolio_backtest(
++            close_panel, open_panel, universe_by_schedule["monthly"],
++            combined_monthly_momentum, monthly_dates, None, cfg,
++        )
++        metrics = compute_metrics(res["equity_curve"], label=f"top_fraction={top_fraction}")
++        conc = concentration_and_exposure_metrics(res["rebalances"], res["exposure"])
++        size_sensitivity_rows.append({"top_fraction": top_fraction, **metrics, **conc})
++
++    weight_cap_sensitivity_rows = []
++    for weight_cap in (0.10, 0.15, 0.20, 0.25, 0.30, 0.50):
++        cfg = PortfolioBacktestConfig(
++            top_fraction=0.20, use_regime_filter=False, single_stock_weight_cap=weight_cap
++        )
++        res = run_portfolio_backtest(
++            close_panel, open_panel, universe_by_schedule["monthly"],
++            combined_monthly_momentum, monthly_dates, None, cfg,
++        )
++        metrics = compute_metrics(res["equity_curve"], label=f"weight_cap={weight_cap}")
++        conc = concentration_and_exposure_metrics(res["rebalances"], res["exposure"])
++        weight_cap_sensitivity_rows.append({"max_position_weight": weight_cap, **metrics, **conc})
++
++    # ------------------------------------------------------------------
++    # Task 5: rolling chronological walk-forward folds, every variant.
++    # ------------------------------------------------------------------
++    print("Building rolling walk-forward folds ...")
++    folds = build_rolling_folds(calendar, first_valid_date=first_exec, window_months=12, step_months=6)
++    print(f"  {len(folds)} folds, {folds[0].start.date()} -> {folds[-1].end.date()} "
++          f"(fold {folds[-1].fold_id} is the final holdout, excluded from selection)")
++
++    fold_rows_by_variant: Dict[str, List[Dict]] = {}
++    summary_by_variant: Dict[str, Dict] = {}
++    for name, res in all_variants.items():
++        rows = [
++            r for r in (fold_metrics(res["equity_curve"], bh_equity, f) for f in folds)
++            if r is not None
++        ]
++        fold_rows_by_variant[name] = rows
++        summary_by_variant[name] = summarize_folds(rows, exclude_final_holdout=True)
++
++    # ------------------------------------------------------------------
++    # Task 7: risk / concentration / exposure metrics for every variant.
++    # ------------------------------------------------------------------
++    print("Computing risk and concentration metrics ...")
++    risk_rows = []
++    for name, res in all_variants.items():
++        metrics = compute_metrics(res["equity_curve"], label=name)
++        conc = concentration_and_exposure_metrics(res["rebalances"], res["exposure"])
++        avg_turnover_pct = round(
++            100.0 * sum(rb.turnover for rb in res["rebalances"]) / max(1, len(res["rebalances"])),
++            3,
++        )
++        summary = summary_by_variant[name]
++        risk_rows.append(
++            {
++                **metrics,
++                **conc,
++                "avg_turnover_per_rebalance_pct": avg_turnover_pct,
++                "walk_forward_fold_count": summary.get("fold_count", 0),
++                "walk_forward_profitable_fold_ratio": summary.get("profitable_fold_ratio"),
++                "walk_forward_beats_bh_fold_ratio": summary.get("beats_buy_and_hold_fold_ratio"),
++                "walk_forward_mean_excess_return_pct": summary.get("mean_excess_return_pct"),
++                "walk_forward_std_excess_return_pct": summary.get("std_excess_return_pct"),
++                "robustness_score": robustness_score(summary, avg_turnover_pct),
++                "holdout_fold_return_pct": (
++                    summary["holdout_fold"]["return_pct"] if summary.get("holdout_fold") else None
++                ),
++                "holdout_fold_beats_bh": (
++                    summary["holdout_fold"]["beats_buy_and_hold"] if summary.get("holdout_fold") else None
++                ),
++            }
++        )
++    bh_metrics = compute_metrics(bh_equity, label="equal_weight_buy_and_hold")
++    risk_rows.append({**bh_metrics, "robustness_score": None})
++
++    risk_df = pd.DataFrame(risk_rows).sort_values("robustness_score", ascending=False, na_position="last")
++
++    # ------------------------------------------------------------------
++    # Task 4: yearly breakdown, every variant + benchmark.
++    # ------------------------------------------------------------------
++    print("Computing yearly breakdowns ...")
++    yearly_rows = []
++    for name, res in all_variants.items():
++        yr = yearly_returns(res["equity_curve"])
++        yr.insert(0, "strategy", name)
++        yearly_rows.append(yr)
++    yr_bh = yearly_returns(bh_equity)
++    yr_bh.insert(0, "strategy", "equal_weight_buy_and_hold")
++    yearly_rows.append(yr_bh)
++    yearly_df = pd.concat(yearly_rows, ignore_index=True)
++
++    # ------------------------------------------------------------------
++    # Select the most robust configuration (not the highest raw return):
++    # highest robustness_score among non-regime, core-grid variants,
++    # computed entirely from non-holdout folds. Regime variants are
++    # reported but excluded from "most robust" selection since Task 6's
++    # finding is that the regime filter's effect here is a data-coverage
++    # artifact, not a genuine signal (see regime_analysis.json).
++    # ------------------------------------------------------------------
++    core_only = risk_df[risk_df["label"].isin(core_variants.keys())]
++    most_robust = core_only.iloc[0]["label"] if not core_only.empty else None
++
++    # ------------------------------------------------------------------
++    # Task 6: regime attribution.
++    # ------------------------------------------------------------------
++    print("Writing regime attribution ...")
++    regime_report = regime_attribution(regime_series)
++    regime_report["return_comparison"] = {
++        name: {
++            "total_return_pct": compute_metrics(res["equity_curve"])["total_return_pct"],
++            "max_drawdown_pct": compute_metrics(res["equity_curve"])["max_drawdown_pct"],
++        }
++        for name, res in regime_variants.items()
++    }
++
++    # ------------------------------------------------------------------
++    # Write reports
++    # ------------------------------------------------------------------
++    print("Writing reports to", OUT_DIR)
++    risk_df.to_csv(OUT_DIR / "risk_and_robustness_scorecard.csv", index=False)
++    yearly_df.to_csv(OUT_DIR / "yearly_breakdown_2021_2026.csv", index=False)
++    pd.DataFrame(size_sensitivity_rows).to_csv(OUT_DIR / "sensitivity_portfolio_size.csv", index=False)
++    pd.DataFrame(weight_cap_sensitivity_rows).to_csv(OUT_DIR / "sensitivity_max_position_weight.csv", index=False)
++
++    fold_rows_flat = []
++    for name, rows in fold_rows_by_variant.items():
++        for r in rows:
++            fold_rows_flat.append({"strategy": name, **r})
++    pd.DataFrame(fold_rows_flat).to_csv(OUT_DIR / "walk_forward_rolling_folds.csv", index=False)
++
++    with (OUT_DIR / "regime_analysis.json").open("w") as f:
++        json.dump(regime_report, f, indent=2, default=str)
++
++    with (OUT_DIR / "experiment_config.json").open("w") as f:
++        json.dump(
++            {
++                "git_commit_hash": _git_commit_hash(),
++                "timestamp_utc": datetime.now(timezone.utc).isoformat(),
++                "cost_model": "competition mode preserved everywhere: no commission, "
++                "no slippage, no market-impact term in any variant in this report",
++                "execution": "next_session_open, integer shares, same convention as "
++                "scripts/run_momentum_benchmark.py",
++                "core_grid_axes": {
++                    "rebalance_frequency": ["monthly", "quarterly"],
++                    "top_fraction": [0.20, 0.30],
++                    "ranking_method": list(RANKING_WEIGHTS.keys()),
++                },
++                "regime_variants_evaluated_separately": list(regime_variants.keys()),
++                "walk_forward": {
++                    "method": "rolling chronological folds, 12-month window, 6-month step",
++                    "fold_count": len(folds),
++                    "final_holdout_fold_id": folds[-1].fold_id,
++                    "selection_rule": "robustness_score computed from non-holdout folds only; "
++                    "the final holdout fold's performance is reported for confirmation and "
++                    "was never used to choose a configuration",
++                },
++                "most_robust_core_variant": most_robust,
++                "selection_methodology": "robustness_score = mean excess return vs "
++                "buy-and-hold across non-holdout folds - 0.5*std(excess return across "
++                "folds) - 0.3*|mean fold max drawdown| - 0.05*avg turnover per rebalance",
++                "known_limitations": [
++                    "Momentum uses price returns, not total returns (no dividend data in "
++                    "the raw CSV source) -- unchanged from the first-task benchmark.",
++                    "TUNINDEX history starts 2023-01-02 in this repo's CSV, so the SMA(200) "
++                    "regime filter is UNKNOWN/defensive by default before ~Oct 2023; see "
++                    "regime_analysis.json for the full attribution.",
++                    "The eligible universe is whatever symbols exist in "
++                    "src/data_collection/raw/ as of this snapshot; if that source already "
++                    "excludes delisted/suspended BVMT symbols, survivorship bias upstream "
++                    "of this code is possible and is not corrected here.",
++                    "Folds overlap by (window - step) = 6 months by construction; this is "
++                    "fine for evaluation-only metrics (nothing is fitted per fold) but means "
++                    "fold rows are not independent observations.",
++                ],
++            },
++            f,
++            indent=2,
++            default=str,
++        )
++
++    # ------------------------------------------------------------------
++    # Console summary
++    # ------------------------------------------------------------------
++    print("\n" + "=" * 78)
++    print(" ROBUSTNESS SCORECARD (core grid, no regime filter, sorted by robustness_score)")
++    print("=" * 78)
++    cols = [
++        "label", "total_return_pct", "cagr_pct", "max_drawdown_pct", "sharpe_ratio",
++        "walk_forward_profitable_fold_ratio", "walk_forward_beats_bh_fold_ratio",
++        "robustness_score", "holdout_fold_return_pct",
++    ]
++    print(core_only[cols].to_string(index=False))
++    print(f"\nMost robust core-grid configuration: {most_robust}")
++
++    print("\n" + "=" * 78)
++    print(" REGIME FILTER: ON vs OFF (monthly, combined ranking)")
++    print("=" * 78)
++    print(
++        risk_df[risk_df["label"].isin(regime_variants.keys())][
++            ["label", "total_return_pct", "max_drawdown_pct", "avg_market_exposure_pct"]
++        ].to_string(index=False)
++    )
++    print(f"\nRegime attribution: {regime_report['pct_unknown_defaulted_defensive']}% of TUNINDEX "
++          f"sessions are UNKNOWN (defaulted defensive), {regime_report['pct_risk_on']}% RISK_ON, "
++          f"{regime_report['pct_risk_off']}% RISK_OFF.")
++
++    print(f"\nReports written to: {OUT_DIR}")
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/src/momentum/__init__.py b/src/momentum/__init__.py
+new file mode 100644
+index 0000000..392f126
+--- /dev/null
++++ b/src/momentum/__init__.py
+@@ -0,0 +1,13 @@
++"""
++Cross-sectional momentum portfolio engine for BVMT AI Trader.
++
++Implements the "First implementation task" from
++BVMT_AI_Trader_Profitability_Roadmap.md, Section 19:
++a standalone, long-only, cross-sectional 3M/6M momentum benchmark,
++with and without the TUNINDEX SMA(200) regime filter, executed at
++next-session open on an equal-weight basis with cash as a valid
++position. This module does not touch or duplicate the existing
++single-stock `src.models.benchmark_runner` / `src.models.ml_predictor`
++pipeline; it is an independent, portfolio-level system per the
++roadmap's Section 3 architecture.
++"""
+diff --git a/src/momentum/data_loader.py b/src/momentum/data_loader.py
+new file mode 100644
+index 0000000..8d28079
+--- /dev/null
++++ b/src/momentum/data_loader.py
+@@ -0,0 +1,175 @@
++"""
++Data foundation (roadmap Section 4), standalone-CSV variant.
++
++The existing project loads prices from PostgreSQL (src/config/database.py,
++src/data_collection/csv_importer.py). No PostgreSQL instance is available in
++this environment, and the roadmap's raw per-symbol CSVs under
++src/data_collection/raw/ already contain everything this first task needs
++(date, OHLC, volume). This loader reads those CSVs directly, with the same
++point-in-time discipline the roadmap requires: no forward-filled prices are
++invented, no missing/no-trade session is converted into a genuine zero
++return, and nothing from the future leaks into a given date's view.
++
++If/when a PostgreSQL instance with the full `daily_prices` table is
++available, this loader can be swapped for a query against that table without
++changing anything downstream (everything past this module only consumes the
++long-format panel returned by `load_price_panel`).
++"""
++
++from __future__ import annotations
++
++from pathlib import Path
++from typing import Dict, Optional
++
++import pandas as pd
++
++RAW_DIR = Path(__file__).resolve().parents[2] / "src" / "data_collection" / "raw"
++
++# bt.csv / sfbt.csv use lowercase filenames but uppercase `symbole` columns;
++# every other file is UPPERCASE.csv. Tunindex.csv is handled separately
++# (different schema/format) by load_tunindex.
++_STOCK_COLUMN_MAP = {
++    "ouverture": "open",
++    "haut": "high",
++    "bas": "low",
++    "cloture": "close",
++    "volume": "volume",
++    "date": "date",
++    "symbole": "symbol",
++}
++
++
++def _load_one_stock_csv(path: Path) -> pd.DataFrame:
++    raw = pd.read_csv(path)
++    raw.columns = [c.strip().lower() for c in raw.columns]
++    missing = [c for c in _STOCK_COLUMN_MAP if c not in raw.columns]
++    if missing:
++        raise ValueError(f"{path.name}: missing expected columns {missing}")
++    df = raw.rename(columns=_STOCK_COLUMN_MAP)[
++        ["symbol", "date", "open", "high", "low", "close", "volume"]
++    ].copy()
++    df["symbol"] = df["symbol"].astype(str).str.strip().str.upper()
++    df["date"] = pd.to_datetime(df["date"], errors="coerce")
++    for col in ("open", "high", "low", "close", "volume"):
++        df[col] = pd.to_numeric(df[col], errors="coerce")
++
++    before = len(df)
++    df = df.dropna(subset=["date", "open", "high", "low", "close", "volume"])
++    # Data-quality gate (roadmap 4.4): drop invalid/inconsistent OHLC and
++    # non-positive prices instead of silently keeping them.
++    valid = (
++        (df["open"] > 0)
++        & (df["high"] > 0)
++        & (df["low"] > 0)
++        & (df["close"] > 0)
++        & (df["high"] >= df[["open", "close", "low"]].max(axis=1))
++        & (df["low"] <= df[["open", "close", "high"]].min(axis=1))
++        & (df["volume"] >= 0)
++    )
++    dropped_invalid = (~valid).sum()
++    df = df[valid]
++    df = df.drop_duplicates(subset=["symbol", "date"], keep="last")
++    df = df.sort_values("date").reset_index(drop=True)
++    dropped = before - len(df)
++    if dropped:
++        df.attrs["dropped_rows"] = int(dropped)
++        df.attrs["dropped_invalid_ohlc"] = int(dropped_invalid)
++    return df
++
++
++def load_price_panel(raw_dir: Optional[Path] = None) -> pd.DataFrame:
++    """Load every per-symbol raw CSV (excluding Tunindex.csv) into one long panel.
++
++    Returns columns: symbol, date, open, high, low, close, volume,
++    sorted by (symbol, date). A session with no row for a symbol means that
++    symbol did not trade that session -- it is never fabricated.
++    """
++    raw_dir = raw_dir or RAW_DIR
++    frames = []
++    quality_log = []
++    for path in sorted(raw_dir.glob("*.csv")):
++        if path.stem.lower() == "tunindex":
++            continue
++        try:
++            df = _load_one_stock_csv(path)
++        except Exception as exc:  # pragma: no cover - defensive
++            quality_log.append({"file": path.name, "status": "FAILED", "error": str(exc)})
++            continue
++        if df.empty:
++            quality_log.append({"file": path.name, "status": "EMPTY"})
++            continue
++        quality_log.append(
++            {
++                "file": path.name,
++                "symbol": df["symbol"].iloc[0],
++                "rows": len(df),
++                "first_date": str(df["date"].min().date()),
++                "last_date": str(df["date"].max().date()),
++                "dropped_rows": int(df.attrs.get("dropped_rows", 0)),
++            }
++        )
++        frames.append(df)
++    panel = pd.concat(frames, ignore_index=True)
++    panel = panel.sort_values(["symbol", "date"]).reset_index(drop=True)
++    panel.attrs["quality_log"] = quality_log
++    return panel
++
++
++def _parse_localized_number(value: str) -> float:
++    text = str(value).strip().replace(" ", "").replace(" ", "")
++    text = text.rstrip("%")
++    if text.endswith("K"):
++        text = text[:-1]
++        mult = 1_000.0
++    elif text.endswith("M"):
++        text = text[:-1]
++        mult = 1_000_000.0
++    else:
++        mult = 1.0
++    if "," in text and "." in text and text.rfind(",") > text.rfind("."):
++        text = text.replace(".", "").replace(",", ".")
++    elif "," in text:
++        text = text.replace(".", "").replace(",", ".")
++    try:
++        return float(text) * mult
++    except ValueError:
++        return float("nan")
++
++
++def load_tunindex(raw_dir: Optional[Path] = None) -> pd.DataFrame:
++    """Load TUNINDEX daily history (date, close), sorted ascending by date."""
++    raw_dir = raw_dir or RAW_DIR
++    path = raw_dir / "Tunindex.csv"
++    raw = pd.read_csv(path, dtype=str)
++    raw.columns = [c.strip() for c in raw.columns]
++    date_col = next(c for c in raw.columns if c.strip().lower() == "date")
++    close_col = next(c for c in raw.columns if c.strip().lower() == "dernier")
++    out = pd.DataFrame(
++        {
++            "date": pd.to_datetime(raw[date_col], dayfirst=True, errors="coerce"),
++            "close": raw[close_col].map(_parse_localized_number),
++        }
++    )
++    out = out.dropna(subset=["date", "close"]).drop_duplicates("date", keep="last")
++    return out.sort_values("date").reset_index(drop=True)
++
++
++def build_trading_calendar(panel: pd.DataFrame) -> pd.DatetimeIndex:
++    """The set of BVMT sessions used as the master calendar: the union of every
++    session on which at least one symbol in the panel actually traded."""
++    return pd.DatetimeIndex(sorted(panel["date"].unique()))
++
++
++def build_close_panel(panel: pd.DataFrame) -> pd.DataFrame:
++    """Wide symbol x date matrix of traded closes. NaN = no trade that session
++    (never forward-filled here; forward-fill, where needed for valuation only,
++    is done explicitly and documented at the point of use)."""
++    return panel.pivot(index="date", columns="symbol", values="close")
++
++
++def build_volume_panel(panel: pd.DataFrame) -> pd.DataFrame:
++    return panel.pivot(index="date", columns="symbol", values="volume")
++
++
++def build_open_panel(panel: pd.DataFrame) -> pd.DataFrame:
++    return panel.pivot(index="date", columns="symbol", values="open")
+diff --git a/src/momentum/engine.py b/src/momentum/engine.py
+new file mode 100644
+index 0000000..3bf6448
+--- /dev/null
++++ b/src/momentum/engine.py
+@@ -0,0 +1,423 @@
++"""
++Core momentum-portfolio engine: universe/liquidity filters (roadmap Section 5),
++momentum features and ranking (Section 6), the TUNINDEX regime filter
++(Section 7), and a multi-asset portfolio backtest with next-session-open
++execution (Sections 11-12). All functions are point-in-time: at decision date
++`d`, nothing past `d` is read.
++"""
++
++from __future__ import annotations
++
++from dataclasses import dataclass, field
++from typing import Dict, List, Optional, Tuple
++
++import numpy as np
++import pandas as pd
++
++TRADING_SESSIONS_3M = 63
++TRADING_SESSIONS_6M = 126
++LIQUIDITY_LOOKBACK = 60
++MAX_ZERO_VOLUME_RATIO = 0.30  # roadmap 5.1 initial threshold
++MIN_AVG_TRADED_VALUE_TND = 100_000.0  # roadmap 5.1 initial threshold
++
++
++# ---------------------------------------------------------------------------
++# Universe & liquidity (Section 5)
++# ---------------------------------------------------------------------------
++
++def compute_point_in_time_universe(
++    close_panel: pd.DataFrame,
++    volume_panel: pd.DataFrame,
++    decision_dates: pd.DatetimeIndex,
++    min_history_sessions: int = TRADING_SESSIONS_6M,
++    liquidity_lookback: int = LIQUIDITY_LOOKBACK,
++    max_zero_volume_ratio: float = MAX_ZERO_VOLUME_RATIO,
++    min_avg_traded_value: float = MIN_AVG_TRADED_VALUE_TND,
++) -> Dict[pd.Timestamp, Dict[str, Dict[str, float]]]:
++    """For every decision date, return every symbol's eligibility and the
++    liquidity statistics behind the decision, using only data up to and
++    including that date.
++
++    Returns: {decision_date: {symbol: {eligible, reason, zero_volume_ratio,
++                                         avg_traded_value_60d, history_sessions}}}
++    """
++    calendar = close_panel.index
++    traded_value_panel = close_panel.fillna(0.0) * volume_panel.reindex(
++        columns=close_panel.columns
++    ).fillna(0.0)
++    traded_flag = close_panel.notna()  # a session on which the symbol actually traded
++
++    result: Dict[pd.Timestamp, Dict[str, Dict[str, float]]] = {}
++    for d in decision_dates:
++        pos = calendar.searchsorted(d, side="right")  # exclusive of future
++        if pos == 0:
++            result[d] = {}
++            continue
++        history_slice = slice(max(0, pos - liquidity_lookback), pos)
++        liq_window_traded = traded_flag.iloc[history_slice]
++        liq_window_value = traded_value_panel.iloc[history_slice]
++        history_sessions_count = traded_flag.iloc[:pos].sum(axis=0)
++
++        zero_vol_ratio = 1.0 - liq_window_traded.mean(axis=0)
++        avg_traded_value = liq_window_value.mean(axis=0)
++        last_traded_pos = traded_flag.iloc[:pos].apply(
++            lambda col: col[col].index.max() if col.any() else pd.NaT
++        )
++        sessions_since_last_trade = pd.Series(
++            {
++                sym: (pos - 1 - calendar.get_loc(ts)) if pd.notna(ts) else np.inf
++                for sym, ts in last_traded_pos.items()
++            }
++        )
++
++        per_symbol: Dict[str, Dict[str, float]] = {}
++        for sym in close_panel.columns:
++            hist = float(history_sessions_count.get(sym, 0))
++            zvr = float(zero_vol_ratio.get(sym, 1.0))
++            atv = float(avg_traded_value.get(sym, 0.0))
++            stale = float(sessions_since_last_trade.get(sym, np.inf))
++
++            reasons = []
++            if hist < min_history_sessions:
++                reasons.append("insufficient_history")
++            if zvr > max_zero_volume_ratio:
++                reasons.append("zero_volume_ratio_too_high")
++            if atv < min_avg_traded_value:
++                reasons.append("avg_traded_value_too_low")
++            if stale > 5:
++                reasons.append("not_currently_tradable")
++
++            per_symbol[sym] = {
++                "eligible": len(reasons) == 0,
++                "reason": ";".join(reasons) if reasons else "OK",
++                "zero_volume_ratio_60d": round(zvr, 4),
++                "avg_traded_value_60d_tnd": round(atv, 2),
++                "history_sessions": hist,
++                "sessions_since_last_trade": stale,
++            }
++        result[d] = per_symbol
++    return result
++
++
++# ---------------------------------------------------------------------------
++# Momentum features & ranking (Section 6)
++# ---------------------------------------------------------------------------
++
++def compute_momentum_scores(
++    close_panel: pd.DataFrame,
++    universe: Dict[pd.Timestamp, Dict[str, Dict[str, float]]],
++    lookback_3m: int = TRADING_SESSIONS_3M,
++    lookback_6m: int = TRADING_SESSIONS_6M,
++    max_price_staleness: int = 5,
++    weight_3m: float = 0.5,
++    weight_6m: float = 0.5,
++) -> Dict[pd.Timestamp, pd.DataFrame]:
++    """For every decision date, compute price-return momentum (3M, 6M),
++    percentile ranks and the composite score, restricted to that date's
++    eligible universe. Returns NaN-free DataFrames indexed by symbol.
++
++    NOTE (roadmap 6.1): dividend/corporate-action data is not available in
++    the raw CSV source for this first task, so this uses PRICE returns, not
++    total returns. This is explicitly the "clearly labeled price-return
++    sensitivity test" the roadmap calls for when dividend data is
++    incomplete -- it is not presented as a total-return momentum signal.
++    """
++    calendar = close_panel.index
++    out: Dict[pd.Timestamp, pd.DataFrame] = {}
++    for d, elig_map in universe.items():
++        pos = calendar.get_loc(d)
++        eligible_syms = [s for s, info in elig_map.items() if info["eligible"]]
++        if not eligible_syms:
++            out[d] = pd.DataFrame(
++                columns=["return_3m", "return_6m", "pct_3m", "pct_6m", "momentum_score"]
++            )
++            continue
++
++        def last_traded_close_near(sym: str, target_pos: int) -> Optional[float]:
++            if target_pos < 0:
++                return None
++            lo = max(0, target_pos - max_price_staleness)
++            window = close_panel[sym].iloc[lo : target_pos + 1]
++            window = window.dropna()
++            if window.empty:
++                return None
++            return float(window.iloc[-1])
++
++        rows = []
++        for sym in eligible_syms:
++            px_now = last_traded_close_near(sym, pos)
++            px_3m = last_traded_close_near(sym, pos - lookback_3m)
++            px_6m = last_traded_close_near(sym, pos - lookback_6m)
++            if px_now is None or px_3m is None or px_6m is None or px_3m <= 0 or px_6m <= 0:
++                continue
++            rows.append(
++                {
++                    "symbol": sym,
++                    "return_3m": px_now / px_3m - 1.0,
++                    "return_6m": px_now / px_6m - 1.0,
++                }
++            )
++        if not rows:
++            out[d] = pd.DataFrame(
++                columns=["return_3m", "return_6m", "pct_3m", "pct_6m", "momentum_score"]
++            )
++            continue
++        frame = pd.DataFrame(rows).set_index("symbol")
++        frame["pct_3m"] = frame["return_3m"].rank(pct=True)
++        frame["pct_6m"] = frame["return_6m"].rank(pct=True)
++        # weight_3m/weight_6m let the caller isolate a pure 3M or pure 6M
++        # ranking (weight=1.0/0.0) from the combined 50/50 score, while still
++        # requiring both lookbacks to be computable so the eligible universe
++        # is identical across ranking methods -- only the ranking formula
++        # changes, not the data available to it.
++        frame["momentum_score"] = weight_3m * frame["pct_3m"] + weight_6m * frame["pct_6m"]
++        out[d] = frame.sort_values("momentum_score", ascending=False)
++    return out
++
++
++# ---------------------------------------------------------------------------
++# TUNINDEX regime filter (Section 7)
++# ---------------------------------------------------------------------------
++
++def compute_regime_series(
++    tunindex: pd.DataFrame, sma_window: int = 200
++) -> pd.DataFrame:
++    """Point-in-time RISK_ON / RISK_OFF / UNKNOWN regime per TUNINDEX session.
++
++    RISK_ON  : close > SMA(window), both using only data up to that session.
++    RISK_OFF : close <= SMA(window).
++    UNKNOWN  : insufficient history for the SMA; defaults to no new risk.
++    """
++    s = tunindex.sort_values("date").reset_index(drop=True).copy()
++    s["sma"] = s["close"].rolling(sma_window, min_periods=sma_window).mean()
++    s["regime"] = np.where(
++        s["sma"].isna(),
++        "UNKNOWN",
++        np.where(s["close"] > s["sma"], "RISK_ON", "RISK_OFF"),
++    )
++    return s[["date", "close", "sma", "regime"]]
++
++
++def regime_as_of(regime_series: pd.DataFrame, d: pd.Timestamp) -> str:
++    """The regime using only TUNINDEX sessions at or before d. UNKNOWN
++    (defensive) if TUNINDEX has no observation at/before d."""
++    eligible = regime_series[regime_series["date"] <= d]
++    if eligible.empty:
++        return "UNKNOWN"
++    return str(eligible.iloc[-1]["regime"])
++
++
++# ---------------------------------------------------------------------------
++# Portfolio construction & multi-asset backtest (Sections 6.3-6.4, 11, 12)
++# ---------------------------------------------------------------------------
++
++@dataclass
++class PortfolioBacktestConfig:
++    initial_capital: float = 10_000.0
++    top_fraction: float = 0.20  # top 20% vs top 30% (Section 6.3)
++    use_regime_filter: bool = False
++    single_stock_weight_cap: float = 0.20  # Section 12
++    rebalance_rank_change_quintiles: int = 2  # "more than two-quintile deterioration"
++
++
++@dataclass
++class RebalanceRecord:
++    decision_date: pd.Timestamp
++    execution_date: Optional[pd.Timestamp]
++    regime: str
++    n_eligible: int
++    n_selected: int
++    selected: List[str]
++    target_weights: Dict[str, float]
++    turnover: float
++
++
++def _select_target_portfolio(
++    momentum: pd.DataFrame,
++    top_fraction: float,
++    weight_cap: float,
++    current_holdings_syms: List[str],
++    rank_change_quintiles: int,
++) -> List[str]:
++    """Top-`top_fraction` of the eligible, ranked universe. Existing holdings
++    are kept while still in the eligible universe, unless their quintile has
++    deteriorated by more than `rank_change_quintiles` quintiles below the cut
++    line (roadmap 6.4 turnover control) -- this avoids unnecessary turnover
++    from marginal rank reshuffling between adjacent names."""
++    if momentum.empty:
++        return []
++    n = len(momentum)
++    cutoff = max(1, int(np.ceil(n * top_fraction)))
++    ranked = momentum.reset_index()  # already sorted desc by momentum_score
++    ranked["rank"] = np.arange(1, n + 1)
++    ranked["quintile"] = np.minimum(5, ((ranked["rank"] - 1) * 5 // n) + 1)
++    top_set = set(ranked.iloc[:cutoff]["symbol"])
++
++    kept = []
++    for sym in current_holdings_syms:
++        row = ranked[ranked["symbol"] == sym]
++        if row.empty:
++            continue  # no longer eligible at all -> drop
++        quintile = int(row.iloc[0]["quintile"])
++        cutoff_quintile = int(ranked.iloc[cutoff - 1]["quintile"])
++        if quintile <= cutoff_quintile + rank_change_quintiles:
++            kept.append(sym)
++
++    selected = list(dict.fromkeys(kept + list(top_set)))
++    # Enforce single-stock weight cap by capping the number of names so that
++    # equal weight never exceeds the cap (simpler and more transparent than
++    # a post-hoc re-weighting for this first-task benchmark).
++    min_names_for_cap = int(np.ceil(1.0 / weight_cap))
++    if len(selected) < min_names_for_cap and len(ranked) >= min_names_for_cap:
++        extra = [s for s in ranked["symbol"] if s not in selected]
++        selected = selected + extra[: max(0, min_names_for_cap - len(selected))]
++    return selected
++
++
++def run_portfolio_backtest(
++    close_panel: pd.DataFrame,
++    open_panel: pd.DataFrame,
++    universe: Dict[pd.Timestamp, Dict[str, Dict[str, float]]],
++    momentum_by_date: Dict[pd.Timestamp, pd.DataFrame],
++    decision_dates: List[pd.Timestamp],
++    regime_series: Optional[pd.DataFrame],
++    config: PortfolioBacktestConfig,
++) -> Dict:
++    """Simulate the long-only equal-weight momentum portfolio.
++
++    Timing (roadmap 11.2): a decision taken at the close of `decision_date`
++    executes no earlier than the next calendar-trading session's OPEN. Daily
++    mark-to-market uses the last traded close (forward-filled for valuation
++    only -- never for computing a return), exactly per Section 4.1's rule
++    that a no-trade session is never treated as a genuine zero return.
++    """
++    calendar = close_panel.index
++    valuation_close = close_panel.ffill()  # valuation only; momentum uses raw returns above
++
++    cash = config.initial_capital
++    shares: Dict[str, int] = {}
++    rebalance_log: List[RebalanceRecord] = []
++    equity_curve = []
++    daily_exposure = []
++
++    def portfolio_value(at_date: pd.Timestamp) -> float:
++        val = cash
++        if shares:
++            px = valuation_close.loc[at_date]
++            for sym, qty in shares.items():
++                p = px.get(sym, np.nan)
++                if pd.notna(p):
++                    val += qty * p
++        return val
++
++    # Build the execution-date mapping: first calendar session strictly after
++    # each decision date.
++    exec_date_for: Dict[pd.Timestamp, Optional[pd.Timestamp]] = {}
++    for d in decision_dates:
++        pos = calendar.searchsorted(d, side="right")
++        exec_date_for[d] = calendar[pos] if pos < len(calendar) else None
++
++    decision_set = set(decision_dates)
++    rebalance_pointer = 0
++    sorted_decisions = sorted(decision_dates)
++
++    for i, today in enumerate(calendar):
++        # Did a prior decision's execution land today? Process all that do,
++        # in decision order (there is at most one per rebalance schedule).
++        while (
++            rebalance_pointer < len(sorted_decisions)
++            and exec_date_for[sorted_decisions[rebalance_pointer]] == today
++        ):
++            d = sorted_decisions[rebalance_pointer]
++            rebalance_pointer += 1
++
++            elig_map = universe.get(d, {})
++            n_eligible = sum(1 for v in elig_map.values() if v["eligible"])
++            momentum = momentum_by_date.get(d, pd.DataFrame())
++
++            regime = regime_as_of(regime_series, d) if regime_series is not None else "RISK_ON"
++            risk_on = (regime == "RISK_ON") if config.use_regime_filter else True
++
++            current_syms = [s for s, q in shares.items() if q > 0]
++            if risk_on and not momentum.empty:
++                selected = _select_target_portfolio(
++                    momentum,
++                    config.top_fraction,
++                    config.single_stock_weight_cap,
++                    current_syms,
++                    config.rebalance_rank_change_quintiles,
++                )
++            else:
++                selected = []  # defensive / no eligible candidates -> hold cash
++
++            pre_rebalance_value = portfolio_value(today)
++            target_weight = (1.0 / len(selected)) if selected else 0.0
++
++            # SELL everything not in the new target (at today's open).
++            opens_today = open_panel.loc[today]
++            turnover_value = 0.0
++            for sym in list(shares.keys()):
++                if sym not in selected and shares[sym] > 0:
++                    px = opens_today.get(sym, np.nan)
++                    if pd.notna(px):
++                        proceeds = shares[sym] * float(px)
++                        cash += proceeds
++                        turnover_value += proceeds
++                        shares[sym] = 0
++
++            # BUY/adjust toward equal target weight for selected names.
++            if selected:
++                target_value_per_name = pre_rebalance_value * target_weight
++                for sym in selected:
++                    px = opens_today.get(sym, np.nan)
++                    if pd.isna(px) or px <= 0:
++                        continue  # could not fill -- documented limitation
++                    held_value = shares.get(sym, 0) * float(px)
++                    delta_value = target_value_per_name - held_value
++                    if delta_value > 0:
++                        buy_shares = int(delta_value // float(px))
++                        buy_shares = min(buy_shares, int(cash // float(px)))
++                        if buy_shares > 0:
++                            cost = buy_shares * float(px)
++                            cash -= cost
++                            shares[sym] = shares.get(sym, 0) + buy_shares
++                            turnover_value += cost
++                    elif delta_value < 0:
++                        sell_shares = min(
++                            shares.get(sym, 0), int((-delta_value) // float(px))
++                        )
++                        if sell_shares > 0:
++                            proceeds = sell_shares * float(px)
++                            cash += proceeds
++                            shares[sym] -= sell_shares
++                            turnover_value += proceeds
++
++            shares = {s: q for s, q in shares.items() if q > 0}
++            post_value = portfolio_value(today)
++            rebalance_log.append(
++                RebalanceRecord(
++                    decision_date=d,
++                    execution_date=today,
++                    regime=regime,
++                    n_eligible=n_eligible,
++                    n_selected=len(selected),
++                    selected=selected,
++                    target_weights={s: target_weight for s in selected},
++                    turnover=turnover_value / post_value if post_value > 0 else 0.0,
++                )
++            )
++
++        val = portfolio_value(today)
++        equity_curve.append(val)
++        invested = val - cash
++        daily_exposure.append(invested / val if val > 0 else 0.0)
++
++    equity = pd.Series(equity_curve, index=calendar, name="equity")
++    exposure = pd.Series(daily_exposure, index=calendar, name="exposure")
++    return {
++        "equity_curve": equity,
++        "exposure": exposure,
++        "rebalances": rebalance_log,
++        "final_cash": cash,
++        "final_shares": shares,
++    }
+diff --git a/src/momentum/performance.py b/src/momentum/performance.py
+new file mode 100644
+index 0000000..cde2411
+--- /dev/null
++++ b/src/momentum/performance.py
+@@ -0,0 +1,63 @@
++"""Performance metrics (roadmap Section 13) for an equity curve."""
++
++from __future__ import annotations
++
++from typing import Dict, Optional
++
++import numpy as np
++import pandas as pd
++
++TRADING_DAYS_PER_YEAR = 252
++
++
++def max_drawdown(equity: pd.Series) -> float:
++    peak = equity.cummax()
++    dd = (equity - peak) / peak
++    return float(dd.min() * 100.0)
++
++
++def compute_metrics(equity: pd.Series, label: str = "") -> Dict[str, float]:
++    equity = equity.dropna()
++    daily_ret = equity.pct_change().dropna()
++    total_return_pct = (equity.iloc[-1] / equity.iloc[0] - 1.0) * 100.0
++    n_days = (equity.index[-1] - equity.index[0]).days
++    years = max(n_days / 365.25, 1e-9)
++    cagr_pct = ((equity.iloc[-1] / equity.iloc[0]) ** (1.0 / years) - 1.0) * 100.0
++    vol_pct = float(daily_ret.std() * np.sqrt(TRADING_DAYS_PER_YEAR) * 100.0)
++    mean_daily = float(daily_ret.mean())
++    sharpe = (
++        (mean_daily / daily_ret.std()) * np.sqrt(TRADING_DAYS_PER_YEAR)
++        if daily_ret.std() > 0
++        else 0.0
++    )
++    downside = daily_ret[daily_ret < 0]
++    sortino = (
++        (mean_daily / downside.std()) * np.sqrt(TRADING_DAYS_PER_YEAR)
++        if len(downside) > 1 and downside.std() > 0
++        else 0.0
++    )
++    mdd = max_drawdown(equity)
++    calmar = (cagr_pct / abs(mdd)) if mdd < 0 else 0.0
++    worst_month = (
++        equity.resample("ME").last().pct_change().dropna().min() * 100.0
++        if len(equity) > 22
++        else 0.0
++    )
++    return {
++        "label": label,
++        "total_return_pct": round(float(total_return_pct), 3),
++        "cagr_pct": round(float(cagr_pct), 3),
++        "annualized_volatility_pct": round(vol_pct, 3),
++        "sharpe_ratio": round(float(sharpe), 3),
++        "sortino_ratio": round(float(sortino), 3),
++        "max_drawdown_pct": round(mdd, 3),
++        "calmar_ratio": round(float(calmar), 3),
++        "worst_month_pct": round(float(worst_month), 3),
++    }
++
++
++def yearly_returns(equity: pd.Series) -> pd.DataFrame:
++    yearly = equity.resample("YE").last()
++    yearly_start = equity.resample("YE").first()
++    rets = (yearly / yearly_start - 1.0) * 100.0
++    return pd.DataFrame({"year": rets.index.year, "return_pct": rets.values.round(3)})
+diff --git a/src/momentum/robustness.py b/src/momentum/robustness.py
+new file mode 100644
+index 0000000..6c58954
+--- /dev/null
++++ b/src/momentum/robustness.py
+@@ -0,0 +1,251 @@
++"""
++Robustness analysis on top of the Section 19 momentum engine: rebalance
++frequency, ranking method and portfolio-size/weight-cap sensitivity grids,
++rolling chronological walk-forward folds, regime-filter attribution, and
++concentration/exposure risk metrics.
++
++This module adds analysis only -- it does not change the no-fee competition
++cost assumption anywhere (no commission, slippage or market-impact term is
++introduced), and it does not modify `src/momentum/engine.py`'s existing
++behaviour for callers that don't pass the new optional arguments.
++"""
++
++from __future__ import annotations
++
++from dataclasses import dataclass
++from typing import Dict, List, Optional, Tuple
++
++import numpy as np
++import pandas as pd
++
++from src.momentum.performance import compute_metrics
++
++
++# ---------------------------------------------------------------------------
++# Rebalance schedules (Task 1)
++# ---------------------------------------------------------------------------
++
++def quarter_end_decision_dates(
++    calendar: pd.DatetimeIndex, min_history: int
++) -> List[pd.Timestamp]:
++    """Last trading session of each calendar quarter, once enough history
++    exists for the 6-month momentum feature. Mirrors
++    scripts.run_momentum_benchmark.month_end_decision_dates but grouped by
++    quarter instead of month."""
++    s = pd.Series(range(len(calendar)), index=calendar)
++    quarter = calendar.year * 10 + calendar.quarter
++    quarter_ends = s.groupby(quarter).apply(lambda x: x.index[-1])
++    dates = sorted(quarter_ends.tolist())
++    return [d for d in dates if calendar.get_loc(d) >= min_history]
++
++
++# ---------------------------------------------------------------------------
++# Rolling chronological walk-forward folds (Task 5)
++# ---------------------------------------------------------------------------
++
++@dataclass
++class WalkForwardFold:
++    fold_id: int
++    start: pd.Timestamp
++    end: pd.Timestamp
++    is_final_holdout: bool
++
++
++def build_rolling_folds(
++    calendar: pd.DatetimeIndex,
++    first_valid_date: pd.Timestamp,
++    window_months: int = 12,
++    step_months: int = 6,
++) -> List[WalkForwardFold]:
++    """Strictly chronological rolling folds: each fold is a fixed-length
++    calendar window (default 12 months), stepped forward by `step_months`
++    (default 6, per the roadmap's own walk-forward convention in Section
++    11.1). Folds are evaluation windows only -- nothing is fitted on a fold,
++    so adjacent folds overlapping by (window - step) months is not leakage,
++    it only means the same equity curve is sliced more than once. The last
++    fold is flagged as the final holdout: it is reported but must never be
++    used to pick the "most robust" configuration (see select_most_robust)."""
++    folds: List[WalkForwardFold] = []
++    cursor = pd.Timestamp(first_valid_date)
++    last_date = calendar.max()
++    fold_id = 0
++    while True:
++        fold_start = cursor
++        fold_end = fold_start + pd.DateOffset(months=window_months)
++        if fold_start >= last_date:
++            break
++        fold_id += 1
++        folds.append(
++            WalkForwardFold(
++                fold_id=fold_id,
++                start=fold_start,
++                end=min(fold_end, last_date + pd.Timedelta(days=1)),
++                is_final_holdout=False,
++            )
++        )
++        cursor = cursor + pd.DateOffset(months=step_months)
++        if fold_end >= last_date:
++            break
++    if folds:
++        folds[-1].is_final_holdout = True
++    return folds
++
++
++def fold_metrics(
++    equity: pd.Series,
++    bh_equity: pd.Series,
++    fold: WalkForwardFold,
++) -> Optional[Dict]:
++    """Performance of one equity curve restricted to one fold's calendar
++    window, compared against the buy-and-hold equity curve over the same
++    window (so the comparison is always same-dates, same-capital, per the
++    roadmap's Section 14 rule)."""
++    seg = equity[(equity.index >= fold.start) & (equity.index < fold.end)]
++    bh_seg = bh_equity[(bh_equity.index >= fold.start) & (bh_equity.index < fold.end)]
++    if len(seg) < 5 or len(bh_seg) < 5:
++        return None
++    strat_ret = float(seg.iloc[-1] / seg.iloc[0] - 1.0) * 100.0
++    bh_ret = float(bh_seg.iloc[-1] / bh_seg.iloc[0] - 1.0) * 100.0
++    peak = seg.cummax()
++    dd = float(((seg - peak) / peak).min() * 100.0)
++    daily_ret = seg.pct_change().dropna()
++    sharpe = (
++        float(daily_ret.mean() / daily_ret.std() * np.sqrt(252))
++        if daily_ret.std() > 0
++        else 0.0
++    )
++    return {
++        "fold_id": fold.fold_id,
++        "fold_start": str(fold.start.date()),
++        "fold_end": str(fold.end.date()),
++        "is_final_holdout": fold.is_final_holdout,
++        "return_pct": round(strat_ret, 3),
++        "buy_and_hold_return_pct": round(bh_ret, 3),
++        "excess_return_pct": round(strat_ret - bh_ret, 3),
++        "max_drawdown_pct": round(dd, 3),
++        "sharpe_ratio": round(sharpe, 3),
++        "profitable": strat_ret > 0,
++        "beats_buy_and_hold": strat_ret > bh_ret,
++    }
++
++
++def summarize_folds(
++    fold_rows: List[Dict], exclude_final_holdout: bool = True
++) -> Dict:
++    """Robustness summary across folds. Per the task's "do not optimize on
++    the final test period" constraint, the summary used for selecting a
++    configuration excludes the final holdout fold by default; the holdout
++    fold's own performance is reported separately for confirmation only."""
++    usable = [r for r in fold_rows if not (exclude_final_holdout and r["is_final_holdout"])]
++    holdout = next((r for r in fold_rows if r["is_final_holdout"]), None)
++    if not usable:
++        return {"fold_count": 0}
++    returns = [r["return_pct"] for r in usable]
++    excess = [r["excess_return_pct"] for r in usable]
++    return {
++        "fold_count": len(usable),
++        "mean_fold_return_pct": round(float(np.mean(returns)), 3),
++        "std_fold_return_pct": round(float(np.std(returns)), 3),
++        "mean_excess_return_pct": round(float(np.mean(excess)), 3),
++        "std_excess_return_pct": round(float(np.std(excess)), 3),
++        "profitable_fold_ratio": round(
++            sum(r["profitable"] for r in usable) / len(usable), 3
++        ),
++        "beats_buy_and_hold_fold_ratio": round(
++            sum(r["beats_buy_and_hold"] for r in usable) / len(usable), 3
++        ),
++        "mean_fold_max_drawdown_pct": round(
++            float(np.mean([r["max_drawdown_pct"] for r in usable])), 3
++        ),
++        "mean_fold_sharpe": round(float(np.mean([r["sharpe_ratio"] for r in usable])), 3),
++        "holdout_fold": holdout,
++    }
++
++
++def robustness_score(summary: Dict, avg_turnover_pct: float) -> float:
++    """A single comparable score that rewards *consistency*, not just mean
++    return: mean excess return vs buy-and-hold across non-holdout folds,
++    penalized for fold-to-fold volatility, drawdown severity and turnover.
++    Mirrors the style of the existing project's validation_score in
++    src/simulator/strategy.py (excess return minus drawdown/activity
++    penalties) rather than inventing an unrelated methodology."""
++    if summary.get("fold_count", 0) == 0:
++        return float("-inf")
++    return round(
++        summary["mean_excess_return_pct"]
++        - 0.5 * summary["std_excess_return_pct"]
++        - 0.3 * abs(summary["mean_fold_max_drawdown_pct"])
++        - 0.05 * avg_turnover_pct,
++        3,
++    )
++
++
++# ---------------------------------------------------------------------------
++# Regime attribution (Task 6)
++# ---------------------------------------------------------------------------
++
++def regime_attribution(regime_series: pd.DataFrame) -> Dict:
++    counts = regime_series["regime"].value_counts()
++    total = len(regime_series)
++    first_known_sma_date = regime_series.loc[
++        regime_series["regime"] != "UNKNOWN", "date"
++    ].min()
++    return {
++        "sessions_total": int(total),
++        "pct_risk_on": round(float(counts.get("RISK_ON", 0) / total * 100.0), 2),
++        "pct_risk_off": round(float(counts.get("RISK_OFF", 0) / total * 100.0), 2),
++        "pct_unknown_defaulted_defensive": round(
++            float(counts.get("UNKNOWN", 0) / total * 100.0), 2
++        ),
++        "tunindex_history_start": str(regime_series["date"].min().date()),
++        "sma200_first_computable": (
++            str(first_known_sma_date.date()) if pd.notna(first_known_sma_date) else None
++        ),
++        "explanation": (
++            "The regime filter reduces return in this sample for two separate reasons, "
++            "not one. (1) Tunindex.csv only has history from "
++            f"{regime_series['date'].min().date()}, so SMA(200) is not computable until "
++            f"{first_known_sma_date.date() if pd.notna(first_known_sma_date) else 'N/A'}. "
++            "Per the roadmap's own rule, an UNKNOWN regime defaults to no new risk, so the "
++            "regime-filtered variants sat in cash through that entire warm-up period even "
++            "though no actual risk-off signal fired -- this is a data-coverage artifact, "
++            "not the filter 'working'. (2) Once the SMA is computable, TUNINDEX spent the "
++            "large majority of the remaining sample above its 200-day average (a sustained "
++            "uptrend), so the filter almost never triggered a real risk-off exit either. "
++            "Across the whole sample it therefore only ever removed upside (the missed 2022 "
++            "momentum gains) without ever being tested against a real, sustained TUNINDEX "
++            "downturn -- the drawdowns the filtered and unfiltered variants did experience "
++            "are statistically similar because that downturn never happened in this window. "
++            "This is a sample-coverage limitation, not evidence the filter is useless: it "
++            "would need a longer TUNINDEX history including a real bear market to be "
++            "properly tested."
++        ),
++    }
++
++
++# ---------------------------------------------------------------------------
++# Concentration & exposure metrics (Task 7)
++# ---------------------------------------------------------------------------
++
++def concentration_and_exposure_metrics(rebalances: List, exposure: pd.Series) -> Dict:
++    n_holdings = [rb.n_selected for rb in rebalances if rb.n_selected > 0]
++    hhi = [
++        sum(w ** 2 for w in rb.target_weights.values())
++        for rb in rebalances
++        if rb.target_weights
++    ]
++    return {
++        "avg_n_holdings": round(float(np.mean(n_holdings)), 2) if n_holdings else 0.0,
++        "min_n_holdings": int(np.min(n_holdings)) if n_holdings else 0,
++        "max_n_holdings": int(np.max(n_holdings)) if n_holdings else 0,
++        "avg_herfindahl_index": round(float(np.mean(hhi)), 4) if hhi else 0.0,
++        "pct_rebalances_all_cash": round(
++            100.0 * sum(1 for rb in rebalances if rb.n_selected == 0) / max(1, len(rebalances)),
++            2,
++        ),
++        "avg_market_exposure_pct": round(float(exposure.mean() * 100.0), 2),
++        "min_market_exposure_pct": round(float(exposure.min() * 100.0), 2),
++        "pct_days_fully_in_cash": round(
++            float((exposure < 0.01).mean() * 100.0), 2
++        ),
++    }
